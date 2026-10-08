@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, tests (CPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - run: cargo fmt --check
+      # CI has no GPU, so everything below builds whisper.cpp for the CPU.
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo test --no-default-features
+
+      - name: Cache test models
+        uses: actions/cache@v6
+        with:
+          path: test-models
+          key: test-models-ggml-tiny-silero-v6.2.0
+      - name: Download test models
+        run: |
+          mkdir -p test-models && cd test-models
+          get() {
+            [ -f "$2" ] || curl -sSfL -o "$2" "$1"
+            echo "$3  $2" | sha256sum -c -
+          }
+          get https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
+            ggml-tiny.bin be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+          get https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin \
+            ggml-silero-v6.2.0.bin 2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987
+      - name: Tests with real models (tiny Whisper)
+        run: cargo test --no-default-features -- --ignored
+        env:
+          KUTE_TEST_MODELS: ${{ github.workspace }}/test-models
+
+  vulkan:
+    name: build with Vulkan (default features)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Vulkan headers and shader compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan-dev glslc
+      - run: cargo build --all-targets
