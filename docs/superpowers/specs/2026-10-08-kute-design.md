@@ -27,8 +27,9 @@ without restructuring.
 - Rolling "keep the last N minutes" buffer.
 - Speaker diarization of the Others track (v1 labels are Me / Others).
 - Capturing only the call app's output instead of the whole default sink monitor.
-- Per-chunk language detection for speakers who switch language mid-conversation.
-- HTTP transcription backend (the `Transcriber` trait exists; only whisper.cpp ships).
+- Remote transcription backends (the `Transcriber` trait exists; only whisper.cpp ships). A
+  Deepgram backend is planned right after the offline pipeline; it is strictly opt-in,
+  because it sends audio off the machine.
 - Echo cancellation (v1 assumes headphones; with speakers, the mic also picks up the
   other side).
 - Live captions, macOS, Windows.
@@ -128,7 +129,8 @@ mode 0700, since it holds recordings of other people.
 ### Time model
 
 - **Session time** `t = 0` is the wall-clock instant of the earliest first sample across
-  both tracks, stored as `started_at` (RFC 3339 with local offset, millisecond precision).
+  both tracks, stored as `started_at` (RFC 9557, i.e. RFC 3339 plus the IANA time zone name, millisecond
+  precision; times are `jiff::Zoned` so wall-clock arithmetic stays correct across DST).
 - Each track stores `offset_ms`: how much later than `t = 0` its first sample arrived.
   `track_time = session_time - offset_ms`.
 - Everything in `meta.toml` and `*.json` is in session-time milliseconds. Wall-clock times
@@ -140,8 +142,8 @@ mode 0700, since it holds recordings of other people.
 id = "2026-10-08T090312"
 title = "Coworking"                     # optional
 kute_version = "0.1.0"
-started_at = "2026-10-08T09:03:12.418+02:00"
-ended_at = "2026-10-08T17:41:05.002+02:00"
+started_at = "2026-10-08T09:03:12.418+02:00[Europe/Rome]"
+ended_at = "2026-10-08T17:41:05.002+02:00[Europe/Rome]"
 state = "processing"                    # recording | processing | done
 interrupted = false                     # true if recovered after a crash
 
@@ -168,6 +170,7 @@ stage = "summarized"                    # pending | transcribed | summarized | s
 languages = { me = "en", others = "it" }
 whisper_model = "large-v3-turbo"
 summarizer = "command: claude -p"
+# failed_step = "transcribe"             # present when stage = "failed": transcribe | summarize
 # error = "..."                         # present when stage = "failed"
 # attempts = 2
 
@@ -276,11 +279,17 @@ is rebuilt from sessions in `processing` state, in session order, then conversat
 ### Per conversation
 
 1. **Transcribe**, per track: read the conversation's range from the WAV (or decode the
-   Opus via ffmpeg for `retranscribe`), shifted by the track's `offset_ms`; run whisper.cpp
-   with Silero VAD enabled and word timestamps; language from `transcribe.language`
-   (`auto` = detected per track per conversation). Segment and word times are converted to
-   session time and stored in `me.json` / `others.json` tagged with `conversation = n`
-   (replacing any earlier entries for `n`).
+   Opus via ffmpeg for `retranscribe`), shifted by the track's `offset_ms`. kute runs Silero
+   VAD itself (`WhisperVadContext`), pads speech regions by 200 ms, joins those less than
+   2 s apart into chunks of at most 120 s, and runs Whisper with token timestamps on each
+   chunk, so Whisper never sees long silences. (whisper.cpp's built-in VAD option is not
+   used: it remaps segment times to the original audio but not token times, so word
+   timestamps would drift.) Language: `transcribe.language`, or with `auto`, detected per
+   chunk for chunks of at least 3 s; shorter chunks take the language of the nearest long
+   chunk, and if there is none, one detection runs on the first 30 s of speech. The track's
+   language for the conversation is the one covering the most chunk time. Segment and word
+   times are converted to session time and stored in `me.json` / `others.json` tagged with
+   `conversation = n` (replacing any earlier entries for `n`).
 2. **Merge:** for each track, for each segment:
    - no words: one line at the segment start with the segment text;
    - otherwise split the words into chunks wherever `next.start - prev.end > 1.0 s`;
@@ -409,7 +418,8 @@ min_words = 80
 | `open <id>` | open the session folder |
 | `summarize <id> [...]` | (re)summarize |
 | `retranscribe <id> [--model m]` | transcribe again from the stored audio |
-| `import <me.wav> <others.wav> [--start time] [--title t]` | import external recordings; `--start` defaults to a sibling `.start` file (the `record-call` layout), then file birth time |
+| `import <me.wav> <others.wav> [--start time] [--title t] [--no-process]` | import external recordings; `--start` defaults to a sibling `.start` file (the `record-call` layout), then file birth time. Until the daemon's conversation splitting exists, an import is one conversation |
+| `process <id>` | finish whatever is outstanding for a session (transcription, summaries, compression), e.g. after a failure |
 | `reindex` | rebuild `index.sqlite` from the files |
 | `model download [name]` / `model list` | manage models |
 | `doctor` | check PipeWire, ffmpeg/ffprobe, GPU backend, models, summarizer reachability (command on `PATH`, URL responds) |
@@ -468,6 +478,7 @@ building on assumptions:
    mic closes *and* Firefox recycles output nodes, long muted stretches would split the
    session, and the liveness rule needs revisiting.
 2. Which PipeWire property marks peak-meter streams (pavucontrol, Plasma applet)?
-3. Does `whisper-rs` expose whisper.cpp's VAD API for live use? If not, pick the WebRTC VAD.
+3. ~~Does `whisper-rs` expose whisper.cpp's VAD API for live use?~~ Yes: whisper-rs 0.16 has
+   `WhisperVadContext::segments_from_samples` (checked 2026-10-08), so live splitting uses Silero.
 4. Does `stream.capture.sink = true` follow default-sink changes as expected?
 5. Does `whisper-rs` with the `vulkan` feature build and run on an NVIDIA GPU?
