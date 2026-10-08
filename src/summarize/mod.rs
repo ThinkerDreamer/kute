@@ -1,6 +1,8 @@
 //! Summarization backends and the prompt they get.
 
+pub mod anthropic;
 pub mod command;
+pub mod openai;
 
 use crate::config::{SummaryBackend, SummaryConfig, expand_tilde};
 use anyhow::{Context, Result, bail};
@@ -93,10 +95,49 @@ pub fn from_config(cfg: &SummaryConfig) -> Result<Option<Box<dyn Summarizer>>> {
                 timeout,
             )))
         }
-        SummaryBackend::Openai | SummaryBackend::Anthropic => {
-            bail!("this summary backend is added in the next task")
+        SummaryBackend::Openai => {
+            let model = cfg
+                .model
+                .clone()
+                .context("summary.backend = \"openai\" needs summary.model")?;
+            let base = cfg
+                .base_url
+                .clone()
+                .unwrap_or_else(|| openai::DEFAULT_BASE_URL.into());
+            let key = cfg.api_key_env.as_deref().map(api_key).transpose()?;
+            Some(Box::new(openai::OpenAiSummarizer::new(
+                base, model, key, timeout,
+            )))
+        }
+        SummaryBackend::Anthropic => {
+            let model = cfg
+                .model
+                .clone()
+                .unwrap_or_else(|| anthropic::DEFAULT_MODEL.into());
+            let base = cfg
+                .base_url
+                .clone()
+                .unwrap_or_else(|| anthropic::DEFAULT_BASE_URL.into());
+            let key = api_key(cfg.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY"))?;
+            Some(Box::new(anthropic::AnthropicSummarizer::new(
+                base, model, key, timeout,
+            )))
         }
     })
+}
+
+/// Blocking HTTP client with a whole-request timeout. Non-2xx statuses are returned, not
+/// turned into errors, so callers can include the response body in their message.
+pub(crate) fn http_agent(timeout: std::time::Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+fn api_key(env: &str) -> Result<String> {
+    std::env::var(env).with_context(|| format!("environment variable {env} is not set"))
 }
 
 #[cfg(test)]
@@ -162,6 +203,29 @@ mod tests {
         assert_eq!(
             load_template(&SummaryConfig::default()).unwrap(),
             DEFAULT_PROMPT
+        );
+    }
+
+    #[test]
+    fn from_config_http_backends() {
+        let mut cfg = SummaryConfig {
+            backend: SummaryBackend::Openai,
+            ..Default::default()
+        };
+        assert!(format!("{:#}", from_config(&cfg).err().unwrap()).contains("summary.model"));
+        cfg.model = Some("qwen3:8b".into());
+        assert_eq!(
+            from_config(&cfg).unwrap().unwrap().name(),
+            "openai: qwen3:8b"
+        );
+
+        let cfg = SummaryConfig {
+            backend: SummaryBackend::Anthropic,
+            api_key_env: Some("KUTE_TEST_UNSET_KEY_VAR".into()),
+            ..Default::default()
+        };
+        assert!(
+            format!("{:#}", from_config(&cfg).err().unwrap()).contains("KUTE_TEST_UNSET_KEY_VAR")
         );
     }
 }
