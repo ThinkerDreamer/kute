@@ -22,6 +22,26 @@ These start to matter once kute runs as a long-lived process.
   later change to the FTS tables can't migrate. Set `PRAGMA user_version` and rebuild the index
   (it's derived) when the version differs.
 
+## From the first real call
+
+Found by comparing kute's transcript of a short English/Italian test call with the
+`transcribe-call` script's transcript of the same recording.
+
+- [ ] **Vocabulary for names and jargon.** Whisper heard "kute" as "Kutu"/"Kutte" and "VAD" as
+  "BAD". Add a `transcribe.vocabulary` config list (e.g. `["kute", "VAD", "meta.toml"]`) and pass
+  it to Whisper through `FullParams::set_initial_prompt` for every chunk in
+  `WhisperTranscriber::transcribe`. Remote backends (Deepgram, ElevenLabs) have the same idea as
+  "keyterms", so keep the setting provider-agnostic.
+- [ ] **Speaker names per session.** Labels are global (`[labels]`), so a 1:1 call can't show real
+  names. Add `kute import ... --me Alex --others Jordan` (and a way to set them later, like
+  `kute title`), store them in `meta.toml`, and fall back to `[labels]` when unset.
+- [ ] **Record the language chosen for each chunk, and revisit how short chunks borrow one.** A
+  short Italian "Sì" came out as English "See": chunks under 3 s take the language of the nearest
+  long chunk, which can be on the other side of a language switch. Store the per-chunk language
+  in the track JSON so cases like this can be diagnosed, then consider borrowing only from a
+  neighbour that isn't separated by a long pause, or detecting on the short chunk plus its
+  surrounding audio.
+
 ## Anytime
 
 - [ ] **`kute model download` floods the terminal.** The progress callback in `src/cli.rs` prints on
