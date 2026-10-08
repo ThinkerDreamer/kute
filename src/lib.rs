@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod config;
+pub mod index;
 pub mod merge;
 pub mod models;
 pub mod render;
