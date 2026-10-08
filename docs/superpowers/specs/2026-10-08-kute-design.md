@@ -290,7 +290,9 @@ is rebuilt from sessions in `processing` state, in session order, then conversat
    chunk, and if there is none, one detection runs on the first 30 s of speech. The track's
    language for the conversation is the one covering the most chunk time. Segment and word
    times are converted to session time and stored in `me.json` / `others.json` tagged with
-   `conversation = n` (replacing any earlier entries for `n`).
+   `conversation = n` (replacing any earlier entries for `n`). Audio is read in 10-minute
+   VAD windows and then one chunk at a time, so memory stays bounded on multi-hour
+   recordings.
 2. **Merge:** for each track, for each segment:
    - no words: one line at the segment start with the segment text;
    - otherwise split the words into chunks wherever `next.start - prev.end > 1.0 s`;
@@ -308,7 +310,8 @@ is rebuilt from sessions in `processing` state, in session order, then conversat
 
 ### Per session
 
-After the session has ended and every conversation is `summarized`, `skipped` or `failed`:
+After the session has ended and every conversation is `summarized`, `skipped`, or failed at
+summarizing (a failed *transcription* keeps the WAVs, so its retry reads lossless audio):
 **compress** both WAVs to Opus with ffmpeg (`libopus`, 24 kbit/s, `-application voip`),
 verify with ffprobe that each Opus file's duration matches its WAV within 0.5 s, then delete
 the WAVs and set `state = "done"`.

@@ -108,7 +108,6 @@ enum ModelCommand {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum BackendArg {
-    None,
     Openai,
     Anthropic,
     Command,
@@ -117,7 +116,6 @@ enum BackendArg {
 impl From<BackendArg> for SummaryBackend {
     fn from(b: BackendArg) -> Self {
         match b {
-            BackendArg::None => SummaryBackend::None,
             BackendArg::Openai => SummaryBackend::Openai,
             BackendArg::Anthropic => SummaryBackend::Anthropic,
             BackendArg::Command => SummaryBackend::Command,

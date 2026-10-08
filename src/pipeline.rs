@@ -142,23 +142,21 @@ impl Pipeline<'_> {
         Ok(report)
     }
 
-    /// Forgets all transcripts and summaries, then processes the session again from the
-    /// stored audio (Opus after compression).
+    /// Transcribes and summarizes every conversation again from the stored audio (Opus
+    /// after compression).
     pub fn retranscribe(&mut self, session: &Session) -> Result<Report> {
         let mut meta = session.load_meta()?;
         if meta.state == SessionState::Recording {
             bail!("session {} is still recording", meta.id);
         }
+        // Load the models first: if that fails, nothing has been touched. Transcripts and
+        // summaries are then replaced conversation by conversation, never wiped up front.
+        if let Some(asr) = self.asr.as_deref_mut() {
+            asr.get().context("loading the transcription models")?;
+        }
         for c in &mut meta.conversations {
             let (n, start_ms, end_ms) = (c.n, c.start_ms, c.end_ms);
             *c = crate::store::Conversation::new(n, start_ms, end_ms);
-        }
-        for track in Track::BOTH {
-            session.save_track(track, &Default::default())?;
-        }
-        let dir = session.summaries_dir();
-        if dir.is_dir() {
-            fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
         }
         session.save_meta(&meta)?;
         self.process(session)
@@ -166,6 +164,11 @@ impl Pipeline<'_> {
 
     /// Summarizes again: every transcribed conversation, or only `only`.
     pub fn resummarize(&mut self, session: &Session, only: Option<u32>) -> Result<Report> {
+        if self.summarizer.is_none() {
+            bail!(
+                "no summarizer is configured (summary.backend = \"none\"); set one in the config or pass --backend"
+            );
+        }
         let mut meta = session.load_meta()?;
         if let Some(n) = only {
             let c = meta
@@ -210,14 +213,26 @@ impl Pipeline<'_> {
         for track in Track::BOTH {
             let offset = meta.tracks.get(track).offset_ms;
             let base_ms = conv.start_ms.max(offset);
-            let samples = if conv.end_ms > base_ms {
-                let source = AudioSource::open(session, track)?;
-                audio::read_wav_range(source.path(), base_ms - offset, conv.end_ms - offset)?
+            // Track time of the first sample we need, and how much audio there is from there.
+            let first = base_ms - offset;
+            let source = if conv.end_ms > base_ms {
+                Some(AudioSource::open(session, track)?)
             } else {
-                Vec::new()
+                None
+            };
+            let total_ms = match &source {
+                Some(s) => (conv.end_ms - offset)
+                    .min(audio::wav_duration_ms(s.path())?)
+                    .saturating_sub(first),
+                None => 0,
+            };
+            let mut read = |a: u64, b: u64| match &source {
+                Some(s) => audio::read_wav_range(s.path(), first + a, first + b),
+                None => Ok(Vec::new()),
             };
             let result = transcribe_track(
-                &samples,
+                &mut read,
+                total_ms,
                 base_ms,
                 n,
                 forced.as_deref(),
@@ -728,8 +743,7 @@ mod tests {
             (Stage::Failed, Some(Step::Transcribe), 1)
         );
         assert!(c.error.as_deref().unwrap().contains("GPU out of memory"));
-        // A failed conversation counts as settled, so the audio was compressed; the retry
-        // decodes the Opus files.
+        // The WAVs were kept for this retry (see transcription_failure_keeps_wavs_for_the_retry).
         let mut asr = FakeProvider::new();
         let report = pipeline(&f, &mut asr, None).process(&f.session).unwrap();
         assert_eq!(report.transcribed, vec![1]);
@@ -828,5 +842,70 @@ mod tests {
         assert!(f.index.search("level", 10).unwrap().is_empty());
         assert_eq!(reindex_all(&f.store, &f.index).unwrap(), 1);
         assert_eq!(f.index.search("level", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn resummarize_without_summarizer_refuses_and_keeps_summaries() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let mut asr = FakeProvider::new();
+        let sum = summarizer(false);
+        pipeline(&f, &mut asr, Some(&sum))
+            .process(&f.session)
+            .unwrap();
+        let err = pipeline(&f, &mut asr, None)
+            .resummarize(&f.session, None)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no summarizer"), "{err:#}");
+        assert!(f.session.conversation_summary_path(1).is_file());
+        assert!(f.session.summary_path().is_file());
+        assert_eq!(
+            f.session.load_meta().unwrap().conversations[0].stage,
+            Stage::Summarized
+        );
+    }
+
+    #[test]
+    fn transcription_failure_keeps_wavs_for_the_retry() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let mut asr = FakeProvider {
+            fail: true,
+            ..FakeProvider::new()
+        };
+        let report = pipeline(&f, &mut asr, None).process(&f.session).unwrap();
+        assert!(!report.compressed);
+        let meta = f.session.load_meta().unwrap();
+        assert_eq!(meta.compression.stage, CompressionStage::Pending);
+        for t in Track::BOTH {
+            assert!(f.session.wav_path(t).is_file());
+            assert!(!f.session.opus_path(t).exists());
+        }
+    }
+
+    #[test]
+    fn retranscribe_with_failing_models_keeps_everything() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let mut asr = FakeProvider::new();
+        let sum = summarizer(false);
+        pipeline(&f, &mut asr, Some(&sum))
+            .process(&f.session)
+            .unwrap();
+        let before = std::fs::read_to_string(f.session.transcript_path()).unwrap();
+        let mut broken = FakeProvider {
+            fail: true,
+            ..FakeProvider::new()
+        };
+        assert!(
+            pipeline(&f, &mut broken, Some(&sum))
+                .retranscribe(&f.session)
+                .is_err()
+        );
+        let meta = f.session.load_meta().unwrap();
+        assert_eq!(meta.conversations[0].stage, Stage::Summarized);
+        assert_eq!(
+            std::fs::read_to_string(f.session.transcript_path()).unwrap(),
+            before
+        );
+        assert!(f.session.conversation_summary_path(1).is_file());
+        assert!(!f.session.load_track(Track::Me).unwrap().segments.is_empty());
     }
 }

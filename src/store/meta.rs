@@ -241,10 +241,13 @@ impl Conversation {
     }
 
     /// True once nothing more will happen to this conversation without a user command.
+    /// A failed transcription is not settled: its retry needs the original WAV, so the
+    /// session must not be compressed yet.
     pub fn is_settled(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Summarized | Stage::Skipped | Stage::Failed
-        )
+        match self.stage {
+            Stage::Summarized | Stage::Skipped => true,
+            Stage::Failed => self.failed_step == Some(Step::Summarize),
+            Stage::Pending | Stage::Transcribed => false,
+        }
     }
 }

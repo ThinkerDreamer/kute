@@ -3,7 +3,7 @@
 
 pub mod whisper;
 
-use crate::audio::{ms_to_samples, samples_to_ms};
+use crate::audio::ms_to_samples;
 use crate::store::{Segment, Word};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -85,26 +85,49 @@ pub struct TrackResult {
     pub segments: Vec<Segment>,
 }
 
-/// Transcribes one track's audio for one conversation. `base_ms` is the session time of
-/// `samples[0]`; returned segments are in session time.
+/// Reads `[start_ms, end_ms)` of the track audio being transcribed.
+pub type ReadAudio<'a> = dyn FnMut(u64, u64) -> Result<Vec<f32>> + 'a;
+
+/// VAD runs over windows of this length, so a long recording is never in memory at once.
+pub const VAD_WINDOW_MS: u64 = 600_000;
+/// A last window shorter than this is folded into the one before it.
+pub const MIN_TAIL_MS: u64 = 60_000;
+
+/// Transcribes one track's audio for one conversation. `read` returns audio by time
+/// relative to the start of that audio, `total_ms` is its length, and `base_ms` is the
+/// session time of its start; returned segments are in session time. Memory use is
+/// bounded by one VAD window plus one chunk.
 pub fn transcribe_track(
-    samples: &[f32],
+    read: &mut ReadAudio,
+    total_ms: u64,
     base_ms: u64,
     conversation: u32,
     forced_language: Option<&str>,
     vad: &mut dyn SpeechDetector,
     asr: &mut dyn Transcriber,
 ) -> Result<TrackResult> {
-    let total_ms = samples_to_ms(samples.len());
-    let chunks = plan_chunks(&vad.speech_regions(samples)?, total_ms);
-    let languages = assign_languages(&chunks, samples, forced_language, asr)?;
+    let mut regions = Vec::new();
+    for window in vad_windows(total_ms) {
+        let samples = read(window.start_ms, window.end_ms)?;
+        for r in vad.speech_regions(&samples)? {
+            regions.push(Span {
+                start_ms: window.start_ms + r.start_ms,
+                end_ms: window.start_ms + r.end_ms,
+            });
+        }
+    }
+    // A region cut by a window edge comes back as two touching regions; plan_chunks
+    // joins them again.
+    let chunks = plan_chunks(&regions, total_ms);
+    let languages = assign_languages(&chunks, read, forced_language, asr)?;
 
     let mut segments = Vec::new();
     let mut coverage: BTreeMap<String, u64> = BTreeMap::new();
     for (chunk, language) in chunks.iter().zip(&languages) {
         *coverage.entry(language.clone()).or_default() += chunk.len_ms();
         let offset = base_ms + chunk.start_ms;
-        for raw in asr.transcribe(slice(samples, *chunk), language)? {
+        let audio = read(chunk.start_ms, chunk.end_ms)?;
+        for raw in asr.transcribe(&audio, language)? {
             segments.push(Segment {
                 conversation,
                 start_ms: offset + raw.start_ms,
@@ -135,9 +158,23 @@ pub fn transcribe_track(
     })
 }
 
+fn vad_windows(total_ms: u64) -> Vec<Span> {
+    let mut windows = Vec::new();
+    let mut start_ms = 0;
+    while start_ms < total_ms {
+        let mut end_ms = (start_ms + VAD_WINDOW_MS).min(total_ms);
+        if total_ms - end_ms < MIN_TAIL_MS {
+            end_ms = total_ms;
+        }
+        windows.push(Span { start_ms, end_ms });
+        start_ms = end_ms;
+    }
+    windows
+}
+
 fn assign_languages(
     chunks: &[Span],
-    samples: &[f32],
+    read: &mut ReadAudio,
     forced: Option<&str>,
     asr: &mut dyn Transcriber,
 ) -> Result<Vec<String>> {
@@ -147,7 +184,7 @@ fn assign_languages(
     let mut detected: Vec<Option<String>> = vec![None; chunks.len()];
     for (i, c) in chunks.iter().enumerate() {
         if c.len_ms() >= MIN_DETECT_MS {
-            detected[i] = Some(asr.detect_language(slice(samples, *c))?);
+            detected[i] = Some(asr.detect_language(&read(c.start_ms, c.end_ms)?)?);
         }
     }
     let known: Vec<(usize, String)> = detected
@@ -161,7 +198,7 @@ fn assign_languages(
         }
         let mut joined = Vec::new();
         for c in chunks {
-            joined.extend_from_slice(slice(samples, *c));
+            joined.extend(read(c.start_ms, c.end_ms)?);
             if joined.len() >= ms_to_samples(DETECT_WINDOW_MS) {
                 break;
             }
@@ -179,6 +216,7 @@ fn assign_languages(
         .collect())
 }
 
+#[cfg(test)]
 fn slice(samples: &[f32], span: Span) -> &[f32] {
     let start = ms_to_samples(span.start_ms).min(samples.len());
     let end = ms_to_samples(span.end_ms).min(samples.len()).max(start);
@@ -237,6 +275,98 @@ mod tests {
         vec![0.0; crate::audio::ms_to_samples(ms)]
     }
 
+    fn run(
+        samples: &[f32],
+        base_ms: u64,
+        n: u32,
+        forced: Option<&str>,
+        vad: &mut dyn SpeechDetector,
+        asr: &mut FakeAsr,
+    ) -> Result<TrackResult> {
+        let total_ms = crate::audio::samples_to_ms(samples.len());
+        let mut read = |a: u64, b: u64| {
+            Ok(slice(
+                samples,
+                Span {
+                    start_ms: a,
+                    end_ms: b,
+                },
+            )
+            .to_vec())
+        };
+        transcribe_track(&mut read, total_ms, base_ms, n, forced, vad, asr)
+    }
+
+    /// Reports runs of non-zero samples as speech, like a real detector would.
+    struct LevelVad;
+    impl SpeechDetector for LevelVad {
+        fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Span>> {
+            let ms = crate::audio::samples_to_ms;
+            let mut out = Vec::new();
+            let mut start = None;
+            for (i, x) in samples.iter().enumerate() {
+                match (start, *x != 0.0) {
+                    (None, true) => start = Some(i),
+                    (Some(a), false) => {
+                        out.push(Span {
+                            start_ms: ms(a),
+                            end_ms: ms(i),
+                        });
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(a) = start {
+                out.push(Span {
+                    start_ms: ms(a),
+                    end_ms: ms(samples.len()),
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    #[test]
+    fn long_tracks_are_read_in_bounded_windows() {
+        use crate::audio::{ms_to_samples, samples_to_ms};
+        let total_ms = 25 * 60_000;
+        let speech = [span(599_000, 601_000), span(1_200_000, 1_210_000)];
+        let mut longest = 0;
+        let mut read = |a: u64, b: u64| -> Result<Vec<f32>> {
+            longest = longest.max(b - a);
+            Ok((ms_to_samples(a)..ms_to_samples(b))
+                .map(|i| {
+                    let t = samples_to_ms(i);
+                    if speech.iter().any(|s| t >= s.start_ms && t < s.end_ms) {
+                        0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect())
+        };
+        let mut asr = FakeAsr::default();
+        let r = transcribe_track(
+            &mut read,
+            total_ms,
+            0,
+            1,
+            Some("en"),
+            &mut LevelVad,
+            &mut asr,
+        )
+        .unwrap();
+        assert!(
+            longest <= VAD_WINDOW_MS + MIN_TAIL_MS,
+            "read {longest} ms at once"
+        );
+        // The speech crossing the 10-minute window edge comes back as one chunk.
+        assert_eq!(asr.calls.len(), 2);
+        assert_eq!(asr.calls[0].0, ms_to_samples(2_000 + 2 * CHUNK_PAD_MS));
+        assert_eq!(r.segments[0].start_ms, 599_000 - CHUNK_PAD_MS + 100);
+    }
+
     #[test]
     fn plan_pads_and_clamps() {
         assert_eq!(
@@ -273,8 +403,7 @@ mod tests {
     #[test]
     fn no_speech_means_no_calls() {
         let mut asr = FakeAsr::default();
-        let r =
-            transcribe_track(&silence(10_000), 0, 1, None, &mut FakeVad(vec![]), &mut asr).unwrap();
+        let r = run(&silence(10_000), 0, 1, None, &mut FakeVad(vec![]), &mut asr).unwrap();
         assert_eq!(r.language, None);
         assert!(r.segments.is_empty());
         assert!(asr.calls.is_empty() && asr.detect_calls.is_empty());
@@ -283,7 +412,7 @@ mod tests {
     #[test]
     fn times_are_shifted_into_session_time() {
         let mut asr = FakeAsr::default();
-        let r = transcribe_track(
+        let r = run(
             &silence(20_000),
             60_000,
             3,
@@ -303,7 +432,7 @@ mod tests {
     #[test]
     fn forced_language_skips_detection() {
         let mut asr = FakeAsr::default();
-        transcribe_track(
+        run(
             &silence(10_000),
             0,
             1,
@@ -323,7 +452,7 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 5_000), span(10_000, 11_000)]);
-        transcribe_track(&silence(20_000), 0, 1, None, vad, &mut asr).unwrap();
+        run(&silence(20_000), 0, 1, None, vad, &mut asr).unwrap();
         assert_eq!(asr.detect_calls.len(), 1);
         assert_eq!(
             asr.calls.iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
@@ -338,7 +467,7 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 1_000), span(5_000, 6_000)]);
-        let r = transcribe_track(&silence(10_000), 0, 1, None, vad, &mut asr).unwrap();
+        let r = run(&silence(10_000), 0, 1, None, vad, &mut asr).unwrap();
         assert_eq!(asr.detect_calls.len(), 1);
         // [0, 1_200] (padding clamped at 0) + [4_800, 6_200]
         assert_eq!(
@@ -355,7 +484,7 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 6_000), span(20_000, 24_000)]);
-        let r = transcribe_track(&silence(30_000), 0, 1, None, vad, &mut asr).unwrap();
+        let r = run(&silence(30_000), 0, 1, None, vad, &mut asr).unwrap();
         assert_eq!(r.language.as_deref(), Some("en"));
         assert_eq!(
             asr.calls.iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
