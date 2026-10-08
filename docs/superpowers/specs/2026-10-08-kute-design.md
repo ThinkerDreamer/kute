@@ -27,8 +27,9 @@ without restructuring.
 - Rolling "keep the last N minutes" buffer.
 - Speaker diarization of the Others track (v1 labels are Me / Others).
 - Capturing only the call app's output instead of the whole default sink monitor.
-- Remote transcription backends (the `Transcriber` trait exists; only whisper.cpp ships). A
-  Deepgram backend is planned right after the offline pipeline; it is strictly opt-in,
+- Remote transcription backends (the `Transcriber` trait exists; only whisper.cpp ships).
+  Planned right after the offline pipeline: one provider-agnostic remote backend layer with
+  Deepgram and ElevenLabs as the first two providers, selected in config. Strictly opt-in,
   because it sends audio off the machine.
 - Echo cancellation (v1 assumes headphones; with speakers, the mic also picks up the
   other side).
