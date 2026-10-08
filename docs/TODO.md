@@ -64,3 +64,33 @@ Found by comparing kute's transcript of a short English/Italian test call with t
 - [ ] **`Store::open` changes permissions on an existing folder.** It sets `storage.dir` to 0700 on
   every run, so pointing it at a shared or existing directory silently changes its mode. Only
   chmod directories kute creates, or document the behavior.
+
+## Packaging (AUR)
+
+The name `kute` was free on the AUR as of 2026-10-08. Registration was closed that day, so this
+also waits on an account.
+
+- [ ] **Decide when to release 0.1.0.** Before the daemon, the AUR description has to promise only
+  the offline pipeline (import, transcribe, summarize, search), since anyone installing `kute`
+  will expect it to record calls. Or wait for plan 3.
+- [ ] **Publish `kute` from tagged releases**, not `kute-git`: yay only picks up `-git` updates with
+  `--devel`, and a tag is a fixed, tested snapshot. Tag with `git tag v0.1.0 && git push --tags`;
+  the PKGBUILD downloads GitHub's generated tarball
+  (`https://github.com/ThinkerDreamer/kute/archive/refs/tags/v$pkgver.tar.gz`). Add `kute-git`
+  later (`provides=(kute)`, `conflicts=(kute)`) if people want to test unreleased work.
+- [ ] **Write the PKGBUILD** following the Arch wiki's Rust package guidelines (`cargo fetch
+  --locked` in `prepare()`, `cargo build --frozen --release` in `build()`), with:
+  - `makedepends`: `cargo`, `cmake`, `clang` (bindgen for whisper.cpp), `vulkan-headers`,
+    `shaderc`
+  - `depends`: `ffmpeg`, `vulkan-icd-loader`, `gcc-libs`, `glibc`
+  - `license=('MIT OR Apache-2.0')`, and install both license files to
+    `/usr/share/licenses/kute/`
+  - the default Vulkan build only; mention `--features cuda` in the README instead of a
+    `kute-cuda` package until someone asks for one
+  - no models in the package: a post-install message pointing to `kute model download`
+- [ ] **Test it before the first push**: build in a clean chroot with `pkgctl build` (devtools),
+  which catches dependencies that only happen to be installed locally, and run `namcap` on the
+  PKGBUILD and the built package.
+- [ ] **Publish**: add an SSH key to the AUR account, `git clone
+  ssh://aur@aur.archlinux.org/kute.git`, commit `PKGBUILD` and `.SRCINFO` (regenerate it with
+  `makepkg --printsrcinfo > .SRCINFO` on every change), push to `master`.
