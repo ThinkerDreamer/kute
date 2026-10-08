@@ -1,6 +1,8 @@
 //! Speech detection, chunking, and per-track transcription. The engines sit behind
 //! traits so the orchestration is testable and other backends can be added.
 
+pub mod whisper;
+
 use crate::audio::{ms_to_samples, samples_to_ms};
 use crate::store::{Segment, Word};
 use anyhow::Result;
