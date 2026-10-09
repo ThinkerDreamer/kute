@@ -98,3 +98,28 @@ fn import_without_models_explains_what_to_do() {
     // Nothing was imported, so nothing is half-processed.
     assert!(String::from_utf8_lossy(&kute(&config, &["list"]).stdout).contains("no sessions"));
 }
+
+#[test]
+fn list_shows_newest_first() {
+    use kute::store::{Meta, Store, Trigger, TriggerKind};
+    let (tmp, config) = setup();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    for (start, title) in [
+        ("2026-10-08T09:00:00+02:00[+02:00]", "older"),
+        ("2026-10-09T09:00:00+02:00[+02:00]", "newer"),
+    ] {
+        let start: jiff::Zoned = start.parse().unwrap();
+        let session = store.create_session(&start).unwrap();
+        let trigger = Trigger {
+            kind: TriggerKind::Import,
+            app_name: None,
+            binary: None,
+        };
+        let mut meta = Meta::new(session.id.clone(), start, trigger, "en".into());
+        meta.title = Some(title.into());
+        session.save_meta(&meta).unwrap();
+    }
+    let out = String::from_utf8_lossy(&kute(&config, &["list"]).stdout).into_owned();
+    let newer = out.find("newer").expect(&out);
+    assert!(newer < out.find("older").expect(&out), "{out}");
+}

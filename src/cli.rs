@@ -194,7 +194,7 @@ pub fn run() -> Result<()> {
             meta.title = Some(title.join(" "));
             session.save_meta(&meta)?;
             pipeline::write_documents(&session, &meta, &config.labels)?;
-            pipeline::index_session(&Index::open(&store.index_path())?, &session)?;
+            pipeline::index_session(&pipeline::open_index(&store)?, &session)?;
         }
         Command::Open { id } => {
             let session = store.resolve(&id)?;
@@ -339,7 +339,7 @@ fn run_pipeline(
     asr: Option<&mut WhisperProvider>,
     work: Work,
 ) -> Result<()> {
-    let index = Index::open(&store.index_path())?;
+    let index = pipeline::open_index(store)?;
     let summarizer = summarize::from_config(&config.summary)?;
     let mut pipeline = Pipeline {
         index: &index,
@@ -391,7 +391,7 @@ fn list(store: &Store, since: Option<&str>) -> Result<()> {
         None => None,
     };
     let mut shown = 0;
-    for session in store.list()? {
+    for session in store.list()?.into_iter().rev() {
         let meta = match session.load_meta() {
             Ok(m) => m,
             Err(e) => {
@@ -422,7 +422,7 @@ fn list(store: &Store, since: Option<&str>) -> Result<()> {
 }
 
 fn search(store: &Store, config: &Config, query: &str, limit: usize) -> Result<()> {
-    let hits = Index::open(&store.index_path())?.search(query, limit)?;
+    let hits = pipeline::open_index(store)?.search(query, limit)?;
     if hits.is_empty() {
         println!("no matches");
     }

@@ -88,6 +88,7 @@ impl Pipeline<'_> {
         if meta.state == SessionState::Recording {
             bail!("session {} is still recording", meta.id);
         }
+        remove_temp_files(session)?;
         let mut report = Report::default();
         let ns: Vec<u32> = meta.conversations.iter().map(|c| c.n).collect();
 
@@ -475,6 +476,33 @@ pub fn index_session(index: &Index, session: &Session) -> Result<()> {
 
 /// Rebuilds the index from every session folder. A broken session is reported on stderr
 /// and skipped, so one bad folder doesn't block search for the rest.
+/// Removes the temp files an interrupted run leaves in the session folder: decoded audio
+/// (`AudioSource`, can be ~1 GB) and half-written Opus (`compress_tracks`).
+fn remove_temp_files(session: &Session) -> Result<()> {
+    for entry in fs::read_dir(&session.dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let temp = name.starts_with(".decoded-") && name.ends_with(".wav")
+            || name.starts_with('.') && name.ends_with(".opus.tmp");
+        if temp && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("removing {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Opens the search index, rebuilding it from the session folders when it was missing or made
+/// by another version of kute.
+pub fn open_index(store: &Store) -> Result<Index> {
+    let index = Index::open(&store.index_path())?;
+    if index.recreated() {
+        reindex_all(store, &index)?;
+    }
+    Ok(index)
+}
+
 pub fn reindex_all(store: &Store, index: &Index) -> Result<usize> {
     index.clear()?;
     let mut count = 0;
@@ -907,5 +935,31 @@ mod tests {
         );
         assert!(f.session.conversation_summary_path(1).is_file());
         assert!(!f.session.load_track(Track::Me).unwrap().segments.is_empty());
+    }
+
+    #[test]
+    fn process_removes_temp_files_left_by_an_interrupted_run() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let stale = [".decoded-me.wav", ".others.opus.tmp"];
+        for name in stale {
+            std::fs::write(f.session.dir.join(name), b"partial").unwrap();
+        }
+        let mut asr = FakeProvider::new();
+        pipeline(&f, &mut asr, None).process(&f.session).unwrap();
+        for name in stale {
+            assert!(!f.session.dir.join(name).exists(), "{name} survived");
+        }
+    }
+
+    #[test]
+    fn open_index_rebuilds_a_missing_or_outdated_index() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let mut asr = FakeProvider::new();
+        pipeline(&f, &mut asr, None).process(&f.session).unwrap();
+        drop(f.index);
+        std::fs::remove_file(f.store.index_path()).unwrap();
+
+        let index = open_index(&f.store).unwrap();
+        assert_eq!(index.search("level", 10).unwrap().len(), 2);
     }
 }

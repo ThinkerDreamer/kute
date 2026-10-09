@@ -15,12 +15,11 @@ These start to matter once kute runs as a long-lived process.
   `AsrProvider::get` fails, `Pipeline::process` calls `Conversation::fail` for each pending
   conversation, so `attempts` grows for all of them. Count it once per session (or not at all)
   before the daemon's retry backoff starts reading `attempts`.
-- [ ] **Temp files survive a Ctrl-C.** `.decoded-<track>.wav` (`AudioSource`, can be ~1 GB) and
-  `.<track>.opus.tmp` (`compress_tracks`) stay in the session folder if kute is interrupted.
-  Remove stale dotfiles at the start of `Pipeline::process`.
-- [ ] **Search index has no schema version.** `src/index.rs` uses `CREATE ... IF NOT EXISTS`, so a
-  later change to the FTS tables can't migrate. Set `PRAGMA user_version` and rebuild the index
-  (it's derived) when the version differs.
+- [x] **Temp files survive a Ctrl-C.** `Pipeline::process` now removes `.decoded-*.wav` and
+  `.*.opus.tmp` before it starts.
+- [x] **Search index has no schema version.** It has `PRAGMA user_version` now; `pipeline::open_index`
+  drops an index from another version and reindexes every session. Bump `SCHEMA_VERSION` in
+  `src/index.rs` on any schema change.
 
 ## From the first real call
 
@@ -46,8 +45,7 @@ Found by comparing kute's transcript of a short English/Italian test call with t
 
 - [x] **`kute model download` floods the terminal.** Now redraws only when the one-decimal value
   changes, and prints a line every 10% when stderr isn't a terminal.
-- [ ] **`kute list` shows oldest first.** Spec section 8 says newest first; reverse the iteration in
-  `list` (`src/cli.rs`).
+- [x] **`kute list` shows oldest first.** Newest first now.
 - [ ] **One very long speech region isn't split.** `plan_chunks` (`src/transcribe/mod.rs`) caps
   chunk length only when joining regions, so a single VAD region over 120 s stays one chunk.
   Practically unreachable (Silero splits on 100 ms of silence) and whisper.cpp windows internally,

@@ -7,6 +7,10 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
 
+/// Bump on any change to `SCHEMA`. An index with another version is dropped and rebuilt from the
+/// session folders, so there are no migrations.
+const SCHEMA_VERSION: i64 = 1;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -28,6 +32,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS summaries USING fts5(
 
 pub struct Index {
     conn: Connection,
+    recreated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +58,32 @@ impl Index {
     pub fn open(path: &Path) -> Result<Index> {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Index { conn })
+        Index::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Index> {
-        let conn = Connection::open_in_memory()?;
+        Index::init(Connection::open_in_memory()?)
+    }
+
+    /// Creates the tables, first dropping them if they were made by another schema version.
+    fn init(conn: Connection) -> Result<Index> {
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let recreated = version != SCHEMA_VERSION;
+        if recreated {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS lines; DROP TABLE IF EXISTS summaries;
+                 DROP TABLE IF EXISTS sessions;",
+            )?;
+        }
         conn.execute_batch(SCHEMA)?;
-        Ok(Index { conn })
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(Index { conn, recreated })
+    }
+
+    /// Whether `open` found no index, or one from another schema version, and started empty.
+    /// The caller should then reindex every session (`pipeline::open_index` does).
+    pub fn recreated(&self) -> bool {
+        self.recreated
     }
 
     pub fn upsert_session(&self, meta: &Meta) -> Result<()> {
@@ -307,5 +330,29 @@ mod tests {
         assert!(idx.search("differential", 10).unwrap().is_empty());
         idx.delete_session("s1").unwrap();
         assert!(idx.search("something", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_index_from_another_schema_version_is_recreated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("index.sqlite");
+        // A table with the right name and the wrong columns, and no version: an older kute.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY);")
+            .unwrap();
+
+        let idx = Index::open(&path).unwrap();
+        assert!(idx.recreated());
+        idx.upsert_session(&meta("s1")).unwrap();
+        drop(idx);
+
+        let idx = Index::open(&path).unwrap();
+        assert!(!idx.recreated());
+        let version: i64 = idx
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }
