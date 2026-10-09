@@ -11,7 +11,7 @@ use crate::summarize;
 use crate::time;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -254,21 +254,76 @@ pub fn run() -> Result<()> {
             let info = models::find_whisper(&name)
                 .with_context(|| format!("unknown Whisper model {name:?}"))?;
             for info in [info, &models::VAD_MODEL] {
-                let path = models::download(&store.models_dir(), info, &mut |done, total| {
-                    eprint!(
-                        "\r{}: {} / {} MB",
-                        info.name,
-                        done / 1_000_000,
-                        total / 1_000_000
-                    );
-                    let _ = std::io::stderr().flush();
-                })?;
-                eprintln!();
-                println!("{}", path.display());
+                let mut progress = Progress::new(info.name, std::io::stderr().is_terminal());
+                let result = models::download(&store.models_dir(), info, &mut |done, total| {
+                    if let Some(text) = progress.update(done, total) {
+                        eprint!("{text}");
+                        let _ = std::io::stderr().flush();
+                    }
+                });
+                if progress.line_open() {
+                    eprintln!();
+                }
+                println!("{}", result?.display());
             }
         }
     }
     Ok(())
+}
+
+/// Download progress for one file. On a terminal it redraws one line, and only when the shown
+/// value changes; otherwise (piped, logged) it prints a line every 10%.
+struct Progress {
+    name: String,
+    tty: bool,
+    last: String,
+}
+
+impl Progress {
+    fn new(name: &str, tty: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            tty,
+            last: String::new(),
+        }
+    }
+
+    /// The text to print for this update, or `None` when nothing visible changed.
+    fn update(&mut self, done: u64, total: u64) -> Option<String> {
+        let mb = |bytes: u64| bytes as f64 / 1_000_000.0;
+        let finished = done >= total;
+        let text = if self.tty {
+            let end = if finished { "\n" } else { "" };
+            format!(
+                "\r{}: {:.1} / {:.1} MB{end}",
+                self.name,
+                mb(done),
+                mb(total)
+            )
+        } else {
+            let tenth = (done * 10).checked_div(total).unwrap_or(10) * 10;
+            if tenth == 0 {
+                return None;
+            }
+            let shown = total * tenth / 100;
+            format!(
+                "{}: {:.1} / {:.1} MB ({tenth}%)\n",
+                self.name,
+                mb(shown),
+                mb(total)
+            )
+        };
+        if text == self.last {
+            return None;
+        }
+        self.last = text.clone();
+        Some(text)
+    }
+
+    /// Whether a terminal line was left without its newline (the download stopped early).
+    fn line_open(&self) -> bool {
+        self.tty && !self.last.is_empty() && !self.last.ends_with('\n')
+    }
 }
 
 enum Work {
@@ -425,5 +480,45 @@ fn model_list(store: &Store, config: &Config) {
             info.name,
             info.size / 1_000_000
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {
+        let mut progress = Progress::new("m", tty);
+        let mut out = Vec::new();
+        let mut done = 0;
+        while done < total {
+            done = (done + step).min(total);
+            out.extend(progress.update(done, total));
+        }
+        out
+    }
+
+    #[test]
+    fn terminal_progress_prints_only_when_the_text_changes() {
+        // 1.6 GB in 64 KiB chunks would be ~25,000 updates; one decimal gives one per 100 kB.
+        let lines = updates(true, 1_000_000, 65_536);
+        assert_eq!(lines.first().unwrap(), "\rm: 0.1 / 1.0 MB");
+        assert_eq!(lines.last().unwrap(), "\rm: 1.0 / 1.0 MB\n");
+        let mut unique = lines.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), lines.len());
+    }
+
+    #[test]
+    fn piped_progress_prints_a_line_every_ten_percent() {
+        let lines = updates(false, 1_600_000_000, 65_536);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[0], "m: 160.0 / 1600.0 MB (10%)\n");
+        assert_eq!(lines[9], "m: 1600.0 / 1600.0 MB (100%)\n");
+    }
+
+    #[test]
+    fn small_models_show_a_fraction_of_a_megabyte() {
+        assert_eq!(updates(true, 885_098, 885_098), ["\rm: 0.9 / 0.9 MB\n"]);
     }
 }

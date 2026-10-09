@@ -44,10 +44,8 @@ Found by comparing kute's transcript of a short English/Italian test call with t
 
 ## Anytime
 
-- [ ] **`kute model download` floods the terminal.** The progress callback in `src/cli.rs` prints on
-  every 64 KiB chunk with whole-MB rounding ("0 / 0 MB" for the VAD model, ~25,000 lines for
-  large-v3-turbo when stderr isn't a terminal). Print only when the shown value changes, use one
-  decimal, end each file with a newline.
+- [x] **`kute model download` floods the terminal.** Now redraws only when the one-decimal value
+  changes, and prints a line every 10% when stderr isn't a terminal.
 - [ ] **`kute list` shows oldest first.** Spec section 8 says newest first; reverse the iteration in
   `list` (`src/cli.rs`).
 - [ ] **One very long speech region isn't split.** `plan_chunks` (`src/transcribe/mod.rs`) caps
@@ -88,6 +86,9 @@ also waits on an account.
   - the default Vulkan build only; mention `--features cuda` in the README instead of a
     `kute-cuda` package until someone asks for one
   - no models in the package: a post-install message pointing to `kute model download`
+  - `export GGML_NATIVE=OFF` in `build()`: whisper.cpp otherwise compiles with `-march=native`,
+    and a package built on one CPU can crash with SIGILL on another (CI hit this, see
+    `.github/workflows/ci.yml`). Local `cargo install` builds keep native for speed.
 - [ ] **Test it before the first push**: build in a clean chroot with `pkgctl build` (devtools),
   which catches dependencies that only happen to be installed locally, and run `namcap` on the
   PKGBUILD and the built package.

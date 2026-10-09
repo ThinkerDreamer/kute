@@ -5,7 +5,6 @@ edition = "2024"
 rust-version = "1.88"
 description = "Records, transcribes and summarizes your calls, locally"
 license = "MIT OR Apache-2.0"
-readme = "README.md"
 keywords = ["transcription", "whisper", "pipewire", "meetings"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
