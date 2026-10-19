@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use jiff::SignedDuration;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -66,7 +66,7 @@ impl Default for TranscribeConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SummaryBackend {
     #[default]

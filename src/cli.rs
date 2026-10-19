@@ -1,13 +1,12 @@
 //! The `kute` command line.
 
 use crate::config::{Config, SummaryBackend};
-use crate::import::{self, ImportRequest};
-use crate::index::{HitKind, Index};
+use crate::index::HitKind;
+use crate::jobs::{self, Job};
 use crate::models;
-use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
+use crate::pipeline;
 use crate::render;
-use crate::store::{Session, SessionState, Store, Track};
-use crate::summarize;
+use crate::store::{SessionState, Store, Track};
 use crate::time;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -126,7 +125,7 @@ impl From<BackendArg> for SummaryBackend {
 pub fn run() -> Result<()> {
     whisper_rs::install_logging_hooks();
     let cli = Cli::parse();
-    let mut config = Config::load(cli.config.as_deref())?;
+    let config = Config::load(cli.config.as_deref())?;
     let store = Store::open(config.data_dir()?)?;
 
     match cli.command {
@@ -136,34 +135,17 @@ pub fn run() -> Result<()> {
             start,
             title,
             no_process,
-        } => {
-            // Check the models first, so a missing model doesn't leave a half-done import.
-            let provider = if no_process {
-                None
-            } else {
-                Some(WhisperProvider::new(&config, &store)?)
-            };
-            let session = import::import(
-                &store,
-                &config,
-                &ImportRequest {
-                    me,
-                    others,
-                    start,
-                    title,
-                },
-            )?;
-            println!("imported {}", session.id);
-            if let Some(mut provider) = provider {
-                run_pipeline(
-                    &store,
-                    &config,
-                    &session,
-                    Some(&mut provider),
-                    Work::Process,
-                )?;
-            }
-        }
+        } => run_job(
+            &store,
+            &config,
+            &Job::Import {
+                me,
+                others,
+                start,
+                title,
+                process: !no_process,
+            },
+        )?,
         Command::Process { id } => {
             let session = store.resolve(&id)?;
             // The daemon's worker processes a recording session's closed conversations; a
@@ -171,14 +153,7 @@ pub fn run() -> Result<()> {
             if session.load_meta()?.state == SessionState::Recording {
                 bail!("session {} is still recording", session.id);
             }
-            let mut provider = WhisperProvider::new(&config, &store)?;
-            run_pipeline(
-                &store,
-                &config,
-                &session,
-                Some(&mut provider),
-                Work::Process,
-            )?;
+            run_job(&store, &config, &Job::Process { id: session.id })?;
         }
         Command::List { since } => list(&store, since.as_deref())?,
         Command::Show { id, summary } => {
@@ -193,14 +168,14 @@ pub fn run() -> Result<()> {
             print!("{text}");
         }
         Command::Search { query, limit } => search(&store, &config, &query.join(" "), limit)?,
-        Command::Title { id, title } => {
-            let session = store.resolve(&id)?;
-            let mut meta = session.load_meta()?;
-            meta.title = Some(title.join(" "));
-            session.save_meta(&meta)?;
-            pipeline::write_documents(&session, &meta, &config.labels)?;
-            pipeline::index_session(&pipeline::open_index(&store)?, &session)?;
-        }
+        Command::Title { id, title } => run_job(
+            &store,
+            &config,
+            &Job::Title {
+                id,
+                title: title.join(" "),
+            },
+        )?,
         Command::Open { id } => {
             let session = store.resolve(&id)?;
             std::process::Command::new("xdg-open")
@@ -213,42 +188,20 @@ pub fn run() -> Result<()> {
             conversation,
             lang,
             backend,
-        } => {
-            let session = store.resolve(&id)?;
-            if let Some(lang) = lang {
-                let mut meta = session.load_meta()?;
-                meta.summary.language = lang;
-                session.save_meta(&meta)?;
-            }
-            if let Some(b) = backend {
-                config.summary.backend = b.into();
-            }
-            run_pipeline(
-                &store,
-                &config,
-                &session,
-                None,
-                Work::Summarize(conversation),
-            )?;
-        }
+        } => run_job(
+            &store,
+            &config,
+            &Job::Summarize {
+                id,
+                conversation,
+                lang,
+                backend: backend.map(Into::into),
+            },
+        )?,
         Command::Retranscribe { id, model } => {
-            let session = store.resolve(&id)?;
-            if let Some(model) = model {
-                config.transcribe.model = model;
-            }
-            let mut provider = WhisperProvider::new(&config, &store)?;
-            run_pipeline(
-                &store,
-                &config,
-                &session,
-                Some(&mut provider),
-                Work::Retranscribe,
-            )?;
+            run_job(&store, &config, &Job::Retranscribe { id, model })?
         }
-        Command::Reindex => {
-            let n = pipeline::reindex_all(&store, &Index::open(&store.index_path())?)?;
-            println!("indexed {n} sessions");
-        }
+        Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
         Command::Model {
             command: ModelCommand::List,
         } => model_list(&store, &config),
@@ -331,56 +284,11 @@ impl Progress {
     }
 }
 
-enum Work {
-    Process,
-    Retranscribe,
-    Summarize(Option<u32>),
-}
-
-fn run_pipeline(
-    store: &Store,
-    config: &Config,
-    session: &Session,
-    asr: Option<&mut WhisperProvider>,
-    work: Work,
-) -> Result<()> {
-    let index = pipeline::open_index(store)?;
-    let summarizer = summarize::from_config(&config.summary)?;
-    let mut pipeline = Pipeline {
-        index: &index,
-        config,
-        asr: asr.map(|p| p as &mut dyn AsrProvider),
-        summarizer: summarizer.as_deref(),
-        template: summarize::load_template(&config.summary)?,
-        quiet: false,
-    };
-    let report = match work {
-        Work::Process => pipeline.process(session)?,
-        Work::Retranscribe => pipeline.retranscribe(session)?,
-        Work::Summarize(only) => pipeline.resummarize(session, only)?,
-    };
-    print_report(session, &report)
-}
-
-fn print_report(session: &Session, report: &Report) -> Result<()> {
-    if session.transcript_path().is_file() {
-        println!("transcript: {}", session.transcript_path().display());
-    }
-    if session.summary_path().is_file() {
-        println!("summary:    {}", session.summary_path().display());
-    }
-    if let Some(e) = &report.compression_error {
-        eprintln!("kute: compression failed (audio kept as WAV): {e}");
-    }
-    if !report.failed.is_empty() {
-        for (n, e) in &report.failed {
-            eprintln!("kute: conversation {n} failed: {e}");
-        }
-        bail!(
-            "{} conversation(s) failed; fix the cause and run `kute process {}`",
-            report.failed.len(),
-            session.id
-        );
+/// Runs a processing job in the foreground and prints what it reports.
+fn run_job(store: &Store, config: &Config, job: &Job) -> Result<()> {
+    let outcome = jobs::run(store, config, &mut None, job)?;
+    if !outcome.message.is_empty() {
+        println!("{}", outcome.message);
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ use crate::store::Meta;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
+use std::time::Duration;
 
 /// Bump on any change to `SCHEMA`. An index with another version is dropped and rebuilt from the
 /// session folders, so there are no migrations.
@@ -58,6 +59,8 @@ impl Index {
     pub fn open(path: &Path) -> Result<Index> {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // The daemon's worker and a foreground command can write at the same time.
+        conn.busy_timeout(Duration::from_secs(5))?;
         Index::init(conn)
     }
 
