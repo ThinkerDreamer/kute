@@ -151,7 +151,7 @@ mod tests {
         let mut m = meta();
         assert_eq!(
             header(&m),
-            "# Coworking. 2026-10-08 09:03 (8 h 37 min, firefox)"
+            "# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)"
         );
         m.title = None;
         m.ended_at = None;
@@ -170,7 +170,7 @@ mod tests {
         };
         let got = render_transcript(&m, &labels, &me, &others);
         let want = "\
-# Coworking. 2026-10-08 09:03 (8 h 37 min, firefox)
+# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)
 
 ## 09:40 to 09:53
 
@@ -191,7 +191,7 @@ _No speech detected._
         let got = render_summary(&m, &[(c1, "## Summary\n\nWe met.\n\n".into())]);
         assert_eq!(
             got,
-            "# Coworking. 2026-10-08 09:03 (8 h 37 min, firefox)\n\n## 09:40 to 09:53\n\n## Summary\n\nWe met.\n"
+            "# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)\n\n## 09:40 to 09:53\n\n## Summary\n\nWe met.\n"
         );
         let lines = conversation_lines(
             c1,

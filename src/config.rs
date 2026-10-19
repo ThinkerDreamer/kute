@@ -13,6 +13,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub transcribe: TranscribeConfig,
     pub summary: SummaryConfig,
+    pub detect: DetectConfig,
+    pub capture: CaptureConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -103,6 +105,40 @@ impl Default for SummaryConfig {
             api_key_env: None,
         }
     }
+}
+
+/// When the daemon starts and stops recording, and how it splits conversations.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DetectConfig {
+    /// A call must be live this long before a session starts.
+    pub min_duration: SignedDuration,
+    /// How long the call may be gone before the session stops.
+    pub stop_grace: SignedDuration,
+    /// Silence on both tracks that ends a conversation.
+    pub conversation_gap: SignedDuration,
+    pub ignore_apps: Vec<String>,
+    /// When set, only these apps trigger a recording.
+    pub allow_apps: Option<Vec<String>>,
+}
+
+impl Default for DetectConfig {
+    fn default() -> Self {
+        Self {
+            min_duration: SignedDuration::from_secs(20),
+            stop_grace: SignedDuration::from_secs(15),
+            conversation_gap: SignedDuration::from_mins(5),
+            ignore_apps: Vec::new(),
+            allow_apps: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CaptureConfig {
+    /// A substring of the microphone's name; the default source when unset.
+    pub mic: Option<String>,
 }
 
 impl Config {
@@ -226,5 +262,30 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
         assert_eq!(expand_tilde(Path::new("/x/~/y")), PathBuf::from("/x/~/y"));
+    }
+
+    #[test]
+    fn detect_and_capture_defaults() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.detect.min_duration, SignedDuration::from_secs(20));
+        assert_eq!(c.detect.stop_grace, SignedDuration::from_secs(15));
+        assert_eq!(c.detect.conversation_gap, SignedDuration::from_mins(5));
+        assert!(c.detect.ignore_apps.is_empty() && c.detect.allow_apps.is_none());
+        assert!(c.capture.mic.is_none());
+    }
+
+    #[test]
+    fn detect_values_parse() {
+        let c = Config::parse(
+            "[detect]\nmin_duration = \"30s\"\nconversation_gap = \"2m\"\nallow_apps = [\"Jitsi Meet\"]\n[capture]\nmic = \"USB\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.detect.min_duration, SignedDuration::from_secs(30));
+        assert_eq!(c.detect.conversation_gap, SignedDuration::from_mins(2));
+        assert_eq!(
+            c.detect.allow_apps.as_deref(),
+            Some(&["Jitsi Meet".to_string()][..])
+        );
+        assert_eq!(c.capture.mic.as_deref(), Some("USB"));
     }
 }

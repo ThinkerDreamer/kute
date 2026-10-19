@@ -23,6 +23,9 @@ pub struct Meta {
     pub summary: SummaryMeta,
     #[serde(default)]
     pub conversations: Vec<Conversation>,
+    /// Start of the conversation still being recorded, in session time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_conversation_ms: Option<u64>,
     #[serde(default)]
     pub compression: Compression,
 }
@@ -169,6 +172,7 @@ impl Meta {
                 language: summary_language,
             },
             conversations: Vec::new(),
+            open_conversation_ms: None,
             compression: Compression::default(),
         }
     }
@@ -184,9 +188,9 @@ impl Meta {
         match self.trigger.kind {
             TriggerKind::App => self
                 .trigger
-                .binary
+                .app_name
                 .clone()
-                .or_else(|| self.trigger.app_name.clone())
+                .or_else(|| self.trigger.binary.clone())
                 .unwrap_or_else(|| "app".into()),
             TriggerKind::Manual => "manual".into(),
             TriggerKind::Import => "import".into(),
@@ -249,5 +253,49 @@ impl Conversation {
             Stage::Failed => self.failed_step == Some(Step::Summarize),
             Stage::Pending | Stage::Transcribed => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta_with(trigger: Trigger) -> Meta {
+        Meta::new(
+            "2026-10-19T100000".into(),
+            "2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap(),
+            trigger,
+            "auto".into(),
+        )
+    }
+
+    #[test]
+    fn app_label_prefers_app_name() {
+        let mut t = Trigger {
+            kind: TriggerKind::App,
+            app_name: Some("Jitsi Meet".into()),
+            binary: Some("electron".into()),
+        };
+        assert_eq!(meta_with(t.clone()).app_label(), "Jitsi Meet");
+        t.app_name = None;
+        assert_eq!(meta_with(t).app_label(), "electron");
+    }
+
+    #[test]
+    fn open_conversation_ms_round_trips() {
+        let mut m = meta_with(Trigger {
+            kind: TriggerKind::Manual,
+            app_name: None,
+            binary: None,
+        });
+        assert!(
+            !toml::to_string_pretty(&m)
+                .unwrap()
+                .contains("open_conversation_ms")
+        );
+        m.open_conversation_ms = Some(12_000);
+        let text = toml::to_string_pretty(&m).unwrap();
+        assert!(text.contains("open_conversation_ms = 12000"), "{text}");
+        assert_eq!(toml::from_str::<Meta>(&text).unwrap(), m);
     }
 }

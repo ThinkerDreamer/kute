@@ -13,6 +13,11 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Serializes `Session::update_meta` within the process, so the recorder and the worker
+/// can't overwrite each other's changes to `meta.toml`.
+static META_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Track {
@@ -157,6 +162,21 @@ impl Session {
 
     pub fn save_meta(&self, meta: &Meta) -> Result<()> {
         write_atomic(&self.meta_path(), toml::to_string_pretty(meta)?.as_bytes())
+    }
+
+    /// Loads the meta, applies `f` and saves it, holding a process-wide lock for the whole
+    /// cycle. Returns the saved meta.
+    pub fn update_meta(&self, f: impl FnOnce(&mut Meta)) -> Result<Meta> {
+        let _guard = META_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut meta = self.load_meta()?;
+        f(&mut meta);
+        self.save_meta(&meta)?;
+        Ok(meta)
+    }
+
+    /// Removes the session folder and everything in it.
+    pub fn delete(self) -> Result<()> {
+        fs::remove_dir_all(&self.dir).with_context(|| format!("removing {}", self.dir.display()))
     }
 
     pub fn wav_path(&self, track: Track) -> PathBuf {
@@ -366,5 +386,53 @@ mod tests {
         );
         s.save_track(Track::Me, &t).unwrap();
         assert_eq!(s.load_track(Track::Me).unwrap(), t);
+    }
+
+    fn session_with_meta() -> (tempfile::TempDir, Session) {
+        let (tmp, store) = store();
+        let s = create_with_meta(&store, "2026-10-19T10:00:00+02:00[+02:00]");
+        (tmp, s)
+    }
+
+    #[test]
+    fn update_meta_serializes_concurrent_writers() {
+        // Two threads each append 50 conversations through update_meta; none may be lost.
+        let (_tmp, session) = session_with_meta();
+        std::thread::scope(|s| {
+            for t in 0..2u32 {
+                let session = &session;
+                s.spawn(move || {
+                    for i in 0..50u32 {
+                        session
+                            .update_meta(|m| {
+                                m.conversations
+                                    .push(Conversation::new(100 + t * 100 + i, 0, 1))
+                            })
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        // The sample meta already holds conversation 1.
+        assert_eq!(session.load_meta().unwrap().conversations.len(), 101);
+    }
+
+    #[test]
+    fn update_meta_returns_the_saved_meta() {
+        let (_tmp, session) = session_with_meta();
+        let saved = session
+            .update_meta(|m| m.title = Some("Planning".into()))
+            .unwrap();
+        assert_eq!(saved, session.load_meta().unwrap());
+        assert_eq!(saved.title.as_deref(), Some("Planning"));
+    }
+
+    #[test]
+    fn delete_removes_the_folder() {
+        let (_tmp, session) = session_with_meta();
+        let dir = session.dir.clone();
+        assert!(dir.is_dir());
+        session.delete().unwrap();
+        assert!(!dir.exists());
     }
 }
