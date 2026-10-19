@@ -201,17 +201,25 @@ later per-speaker labels on the others side (`Others (A)`).
 - **Mic stream:** a node with `media.class = Stream/Input/Audio` linked to a node with
   `media.class = Audio/Source` (a real capture source, not a sink monitor).
 - **Ignored stream:** belongs to kute's own PID; or is a peak-meter / level-monitoring
-  stream (pavucontrol, the Plasma volume applet; the exact property is confirmed in
-  implementation task 1); or its app matches `detect.ignore_apps`; or `detect.allow_apps`
-  is set and the app is not in it. App matching uses `application.process.binary`, falling
-  back to `application.name`, case-insensitively.
+  stream, marked by `stream.monitor = true` (the Plasma volume applet's
+  `PlasmaPA-VolumeMeter` streams, confirmed in the spike; see section 12); or its app
+  matches `detect.ignore_apps`; or `detect.allow_apps` is set and the app is not in it.
+  An app matches a rule if its `application.process.binary` or its `application.name` does,
+  case-insensitively. Labels (tray, `meta.toml`) use `application.name` when set, since
+  Electron apps all report the binary `electron` (the Jitsi Meet app is
+  `application.name = "Jitsi Meet"`, binary `electron`).
 - **Trigger app:** the app of the first non-ignored mic stream of a session.
 - **Session alive:** any non-ignored mic stream exists, **or** one of the session's
   *bound output nodes* still exists. A bound output node is a `Stream/Output/Audio` node of
-  the trigger app (same binary) that was present at some moment while a mic stream was
-  alive. The second clause keeps a session alive if an app closes its mic on mute. It is
-  bound to specific node IDs, not to the app, so a YouTube video started in the same
+  the trigger app (same binary and `application.name`) that was present at some moment
+  while a mic stream was alive. The second clause keeps a session alive if an app closes its
+  mic on mute. It is bound to specific nodes, not to the app, so a YouTube video started in the same
   Firefox after leaving the call opens a new node and does not keep the session alive.
+  Nodes are tracked by `object.serial`, never by node ID: PipeWire reuses IDs within
+  seconds (the spike saw ID 85 go from Jitsi's mic to a Plasma meter).
+- **Short gaps don't count:** a mic stream that closes and is replaced within 2 s keeps the
+  session (and a Tentative capture) alive. The Jitsi Meet app closes its pre-join mic
+  stream and opens a new one on joining.
 
 ### State machine
 
@@ -471,18 +479,36 @@ read-only connections. Without the daemon, the CLI writes directly.
   responsibility.
 - Ships a systemd user unit; AUR package once stable.
 
-## 12. To verify in implementation task 1
+## 12. Spike results (2026-10-19)
 
-A short spike on a development machine (KDE Plasma on Wayland, NVIDIA GPU) before
-building on assumptions:
+Checked on the development machine (KDE Plasma on Wayland, NVIDIA GPU, PipeWire) with
+the Jitsi Meet desktop app, which is Electron (Chromium), rather than Firefox. Method: a
+script logged every change to PipeWire audio streams, their links and the default source's
+mute flag while the user went through a call.
 
-1. Does Jitsi Meet in Firefox keep the mic stream open while muted in the Jitsi UI?
-   Does it keep the same output node open during silence, or close and reopen it? If the
-   mic stays open on mute (expected), the bound-output-node clause rarely matters. If the
-   mic closes *and* Firefox recycles output nodes, long muted stretches would split the
-   session, and the liveness rule needs revisiting.
-2. Which PipeWire property marks peak-meter streams (pavucontrol, Plasma applet)?
+1. **Mute and silence (Jitsi Meet app): the mic stays open.** Muting in the Jitsi UI
+   changed nothing PipeWire can see: the mic stream stayed `running`, not corked or muted.
+   One output stream stayed `running` through 30 s of silence on both sides. So muted or
+   quiet stretches don't split a session, and anything said while muted in Jitsi is
+   recorded on the Me track. Other details:
+   - The pre-join screen opens its own mic stream; joining closes it and opens a new one
+     (hence the 2 s gap rule in section 5).
+   - On joining, the app also creates several short-lived output streams (sounds), gone
+     within ~5 s. Only one stays.
+   - Leaving the room closes the mic stream at once and idles the output stream; closing
+     the app removes it.
+   - A Plasma (system) mute shows only as the default source's mute flag; the app's
+     stream is untouched. Detect it from the source, not the stream.
+   - The app's streams have `application.name = "Jitsi Meet"` but binary `electron`, so
+     the binary alone can't tell Electron apps apart (section 5 matches on either).
+   - Firefox was not tested; check it if someone uses Jitsi or Meet in a browser.
+2. **Peak meters: `stream.monitor = true`.** The Plasma volume applet opens
+   `Stream/Input/Audio` nodes named `PlasmaPA-VolumeMeter` (binary `plasmashell`, empty
+   `application.name`), some linked to real sources and one to Jitsi's output stream, and
+   churns through ~10 of them in a few seconds while open. pavucontrol was not tested.
 3. ~~Does `whisper-rs` expose whisper.cpp's VAD API for live use?~~ Yes: whisper-rs 0.16 has
    `WhisperVadContext::segments_from_samples` (checked 2026-10-08), so live splitting uses Silero.
-4. Does `stream.capture.sink = true` follow default-sink changes as expected?
-5. Does `whisper-rs` with the `vulkan` feature build and run on an NVIDIA GPU?
+4. **`stream.capture.sink = true` follows the default sink.** A `pw-record` stream with it
+   moved from the USB headset's monitor to HDMI and back as the default sink changed,
+   without reconnecting.
+5. **The `vulkan` feature builds and runs on the NVIDIA GPU** (checked 2026-10-08).
