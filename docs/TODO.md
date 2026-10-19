@@ -60,6 +60,30 @@ Found by comparing kute's transcript of a short English/Italian test call with t
   every run, so pointing it at a shared or existing directory silently changes its mode. Only
   chmod directories kute creates, or document the behavior.
 
+## From the daemon (plan 3)
+
+Found in the final review of plan 3 and deferred.
+
+- [ ] **One stalled track holds live splitting back.** `LiveSession` advances the splitter to
+  `min(a, b)` of what each track has analysed (`src/live.rs`), so a track that stops delivering
+  audio without ending stops conversations from closing for the rest of the session. They still
+  close at `finish`. A silent-track timeout would keep splitting going.
+- [ ] **Sessions with conversations that failed 4+ times are re-run on every daemon start.**
+  `worker::startup_jobs` queues every `processing` session, and one whose transcription failed
+  for good stays `processing`, so each start pays a model load for nothing.
+- [ ] **WAVs over 4 GiB fail.** hound's RIFF sizes are 32-bit: about 37 h of 16 kHz audio per
+  track.
+- [ ] **No `pw-dump` repeats the same log line.** The monitor reconnects every 30 s and logs "lost
+  the PipeWire graph" each time. `kute doctor` (plan 4) should check for `pw-dump` and
+  `pw-record`.
+- [ ] **Suspend/resume during a session is untested.** The daemon's clock is monotonic and pauses
+  in suspend while the wall clock jumps; check what the detector and the track offsets make of it.
+- [ ] **Live VAD lost, then a crash.** After a track loses its speech detection, `finish` makes the
+  audio after the last closed conversation one conversation, but nothing records that in
+  `meta.toml`: `live::recover` after a crash only closes an open conversation, so the audio after
+  the loss isn't transcribed unless one was open. Saving `open_conversation_ms` at the loss would
+  cover it.
+
 ## Packaging (AUR)
 
 The name `kute` was free on the AUR as of 2026-10-08. Registration was closed that day, so this
