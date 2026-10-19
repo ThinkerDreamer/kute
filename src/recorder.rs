@@ -142,6 +142,8 @@ pub enum RecorderEvent {
     FirstSample {
         track: Track,
         at: jiff::Zoned,
+        /// Whether the track has live speech detection.
+        vad: bool,
     },
     /// Track time.
     Speech {
@@ -153,6 +155,10 @@ pub enum RecorderEvent {
     Analysed {
         track: Track,
         until_ms: u64,
+    },
+    /// Speech detection failed: no more `Speech` or `Analysed` for this track.
+    VadLost {
+        track: Track,
     },
     Ended {
         track: Track,
@@ -255,6 +261,7 @@ fn record(
             let _ = tx.send(RecorderEvent::FirstSample {
                 track,
                 at: time::now(),
+                vad: live.detector.is_some(),
             });
             Instant::now()
         });
@@ -354,6 +361,7 @@ impl LiveVad {
                     self.track.as_str()
                 );
                 self.detector = None;
+                let _ = tx.send(RecorderEvent::VadLost { track: self.track });
             }
         }
         self.block.clear();
@@ -480,7 +488,11 @@ mod tests {
         live.feed_silence(1_000_000, &tx);
         live.run(&tx);
         drop(tx);
-        assert_eq!(rx.iter().count(), 0);
+        let events: Vec<RecorderEvent> = rx.iter().collect();
+        assert!(
+            matches!(&events[..], [RecorderEvent::VadLost { track: Track::Me }]),
+            "{events:?}"
+        );
     }
 
     fn pcm(seconds: u32, value: i16) -> Vec<u8> {
@@ -520,6 +532,7 @@ mod tests {
                     e,
                     RecorderEvent::FirstSample {
                         track: Track::Me,
+                        vad: true,
                         ..
                     }
                 )
@@ -585,6 +598,7 @@ mod tests {
             events[0],
             RecorderEvent::FirstSample {
                 track: Track::Others,
+                vad: false,
                 ..
             }
         ));

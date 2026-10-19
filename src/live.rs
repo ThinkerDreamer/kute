@@ -40,7 +40,11 @@ pub struct LiveSession {
     analysed: [Option<u64>; 2],
     /// Sample counts from `Ended`.
     samples: [Option<u64>; 2],
-    vad_ok: bool,
+    /// A track had no live speech detection or lost it, so the splitter can't be trusted
+    /// with the audio after the last closed conversation.
+    vad_lost: bool,
+    /// End of the last closed conversation.
+    closed_until: u64,
     /// Set by `finish`/`discard`: from then on a track ending is expected.
     stopping: bool,
     failed: Option<String>,
@@ -108,7 +112,6 @@ impl LiveSession {
         meta.tracks.others.device = req.devices.1;
         session.save_meta(&meta)?;
 
-        let vad_ok = vad().is_some();
         // Dropping `me` on an error stops it.
         let me = source
             .open(Track::Me, req.mic_target.as_deref())
@@ -142,7 +145,8 @@ impl LiveSession {
             offsets: [0; 2],
             analysed: [None; 2],
             samples: [None; 2],
-            vad_ok,
+            vad_lost: false,
+            closed_until: 0,
             stopping: false,
             failed: None,
             next_n: 1,
@@ -167,34 +171,37 @@ impl LiveSession {
     /// `Speech` before its `Analysed`, which is what `Splitter` needs.
     fn on_event(&mut self, ev: RecorderEvent) -> Result<Vec<u32>> {
         match ev {
-            RecorderEvent::FirstSample { track, at } => match &self.t0 {
-                None => {
-                    self.session.update_meta(|m| m.started_at = at.clone())?;
-                    self.t0 = Some(at);
-                }
-                // The threads race to send, so the earlier sample can arrive second: it
-                // becomes session time 0. Only ever a few ms, before any speech.
-                Some(t0) if at < *t0 => {
-                    let shift = time::ms_between(&at, t0);
-                    for t in Track::BOTH {
-                        self.offsets[idx(t)] = if t == track { 0 } else { shift };
+            RecorderEvent::FirstSample { track, at, vad } => {
+                self.vad_lost |= !vad;
+                match &self.t0 {
+                    None => {
+                        self.session.update_meta(|m| m.started_at = at.clone())?;
+                        self.t0 = Some(at);
                     }
-                    let offsets = self.offsets;
-                    self.session.update_meta(|m| {
-                        m.started_at = at.clone();
+                    // The threads race to send, so the earlier sample can arrive second: it
+                    // becomes session time 0. Only ever a few ms, before any speech.
+                    Some(t0) if at < *t0 => {
+                        let shift = time::ms_between(&at, t0);
                         for t in Track::BOTH {
-                            m.tracks.get_mut(t).offset_ms = offsets[idx(t)];
+                            self.offsets[idx(t)] = if t == track { 0 } else { shift };
                         }
-                    })?;
-                    self.t0 = Some(at);
+                        let offsets = self.offsets;
+                        self.session.update_meta(|m| {
+                            m.started_at = at.clone();
+                            for t in Track::BOTH {
+                                m.tracks.get_mut(t).offset_ms = offsets[idx(t)];
+                            }
+                        })?;
+                        self.t0 = Some(at);
+                    }
+                    Some(t0) => {
+                        let offset = time::ms_between(t0, &at);
+                        self.offsets[idx(track)] = offset;
+                        self.session
+                            .update_meta(|m| m.tracks.get_mut(track).offset_ms = offset)?;
+                    }
                 }
-                Some(t0) => {
-                    let offset = time::ms_between(t0, &at);
-                    self.offsets[idx(track)] = offset;
-                    self.session
-                        .update_meta(|m| m.tracks.get_mut(track).offset_ms = offset)?;
-                }
-            },
+            }
             RecorderEvent::Speech {
                 track,
                 start_ms,
@@ -214,6 +221,7 @@ impl LiveSession {
                     return self.on_split(ev);
                 }
             }
+            RecorderEvent::VadLost { .. } => self.vad_lost = true,
             RecorderEvent::Ended { track, samples } => {
                 self.samples[idx(track)] = Some(samples);
                 if !self.stopping {
@@ -246,6 +254,7 @@ impl LiveSession {
                     m.open_conversation_ms = None;
                 })?;
                 self.next_n += 1;
+                self.closed_until = end_ms;
                 Ok(vec![n])
             }
         }
@@ -291,13 +300,14 @@ impl LiveSession {
             })
             .max()
             .unwrap_or(0);
-        let last = if self.vad_ok {
+        let last = if self.vad_lost {
+            // Speech detection doesn't cover what came after: it is all one conversation.
+            (self.closed_until < end).then_some((self.closed_until, end))
+        } else {
             match self.splitter.finish(end) {
                 Some(SplitEvent::Closed { start_ms, end_ms }) => Some((start_ms, end_ms)),
                 _ => None,
             }
-        } else {
-            (end > 0).then_some((0, end))
         };
         let n = self.next_n;
         self.session.update_meta(|m| {
@@ -402,7 +412,8 @@ mod tests {
     use crate::store::{
         Conversation, Meta, SessionState, Stage, Store, Track, Trigger, TriggerKind,
     };
-    use crate::testing::{FakeSource, crash_wav, run_vad};
+    use crate::testing::{FakeSource, RunVad, crash_wav, run_vad};
+    use crate::transcribe::{Span, SpeechDetector};
     use anyhow::{Result, bail};
     use jiff::{SignedDuration, Zoned};
     use std::io::Write;
@@ -524,11 +535,13 @@ mod tests {
         live.on_event(RecorderEvent::FirstSample {
             track: Track::Me,
             at: me_at.clone(),
+            vad: true,
         })
         .unwrap();
         live.on_event(RecorderEvent::FirstSample {
             track: Track::Others,
             at: others_at,
+            vad: true,
         })
         .unwrap();
         let meta = store.session(live.id()).unwrap().load_meta().unwrap();
@@ -549,11 +562,13 @@ mod tests {
         live.on_event(RecorderEvent::FirstSample {
             track: Track::Me,
             at: crate::time::add_ms(&others_at, 37),
+            vad: true,
         })
         .unwrap();
         live.on_event(RecorderEvent::FirstSample {
             track: Track::Others,
             at: others_at.clone(),
+            vad: true,
         })
         .unwrap();
         assert_eq!(live.offsets, [37, 0]);
@@ -587,6 +602,7 @@ mod tests {
             live.on_event(RecorderEvent::FirstSample {
                 track,
                 at: at.clone(),
+                vad: true,
             })
             .unwrap();
         }
@@ -620,6 +636,86 @@ mod tests {
         assert_eq!(meta.conversations, [Conversation::new(1, 0, 10_000)]);
         assert_eq!(meta.duration_ms(), Some(10_000));
         assert_eq!(meta.state, SessionState::Processing);
+    }
+
+    /// `RunVad` for the first `ok` blocks, then errors, like a Silero that breaks.
+    struct FailAfter {
+        ok: usize,
+    }
+
+    impl SpeechDetector for FailAfter {
+        fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Span>> {
+            if self.ok == 0 {
+                bail!("speech detection broke");
+            }
+            self.ok -= 1;
+            RunVad.speech_regions(samples)
+        }
+    }
+
+    fn fail_after(ok: usize) -> VadFactory {
+        Arc::new(move || Some(Box::new(FailAfter { ok }) as Box<dyn SpeechDetector>))
+    }
+
+    /// Writes `me` and `others` from threads (pipes hold 64 KiB) and waits for both.
+    fn write_both(source: &FakeSource, me: Vec<u8>, others: Vec<u8>) {
+        let writers = [(Track::Me, me), (Track::Others, others)].map(|(track, bytes)| {
+            let mut w = source.writer(track);
+            std::thread::spawn(move || w.write_all(&bytes).unwrap())
+        });
+        for w in writers {
+            w.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_session_whose_live_vad_fails_at_once_is_one_conversation() {
+        let (_tmp, store) = store();
+        let source = FakeSource::default();
+        let live =
+            LiveSession::start(&store, &config(30), manual(), &source, fail_after(0)).unwrap();
+        write_both(&source, pcm(25, 1_000..3_000), pcm(25, 15_000..17_000));
+        let session = live.finish().unwrap();
+        let meta = session.load_meta().unwrap();
+        let end = meta.duration_ms().unwrap();
+        assert!(end >= 25_000, "{end}");
+        assert_eq!(meta.conversations, [Conversation::new(1, 0, end)]);
+    }
+
+    #[test]
+    fn a_track_that_gets_no_live_vad_makes_the_session_one_conversation() {
+        let (_tmp, store) = store();
+        let source = FakeSource::default();
+        // Only the first detector loads (the model went away, say).
+        let loaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let vad: VadFactory = Arc::new(move || {
+            let first = !loaded.swap(true, std::sync::atomic::Ordering::SeqCst);
+            first.then(|| Box::new(RunVad) as Box<dyn SpeechDetector>)
+        });
+        let live = LiveSession::start(&store, &config(30), manual(), &source, vad).unwrap();
+        write_both(&source, pcm(25, 1_000..3_000), pcm(25, 15_000..17_000));
+        let session = live.finish().unwrap();
+        let meta = session.load_meta().unwrap();
+        let end = meta.duration_ms().unwrap();
+        assert_eq!(meta.conversations, [Conversation::new(1, 0, end)]);
+    }
+
+    #[test]
+    fn after_live_vad_is_lost_the_rest_is_one_conversation() {
+        let (_tmp, store) = store();
+        let source = FakeSource::default();
+        // Block 1 (0-10 s) closes conversation 1; block 2 fails on both tracks.
+        let live =
+            LiveSession::start(&store, &config(5), manual(), &source, fail_after(1)).unwrap();
+        write_both(&source, pcm(25, 1_000..3_000), pcm(25, 15_000..17_000));
+        let session = live.finish().unwrap();
+        let meta = session.load_meta().unwrap();
+        let end = meta.duration_ms().unwrap();
+        assert_eq!(meta.conversations.len(), 2, "{:?}", meta.conversations);
+        let (c1, c2) = (&meta.conversations[0], &meta.conversations[1]);
+        assert_eq!(c1.start_ms, 0);
+        assert!(c1.end_ms.abs_diff(5_000) <= 50, "{c1:?}");
+        assert_eq!((c2.n, c2.start_ms, c2.end_ms), (2, c1.end_ms, end));
     }
 
     #[test]
