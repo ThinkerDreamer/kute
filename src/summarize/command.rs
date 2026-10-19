@@ -60,14 +60,13 @@ impl Summarizer for CommandSummarizer {
         let Some(status) = child.wait_timeout(self.timeout)? else {
             // SAFETY: plain syscall. The child leads the group we created with
             // `process_group(0)`, so its pid is the group id and `-pid` targets that group.
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            let killed = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) } == 0;
+            if !killed {
+                let _ = child.kill();
             }
             let _ = child.wait();
-            // The group is dead, so the pipes are closed and the helper threads finish.
-            let _ = writer.join();
-            let _ = out_reader.join();
-            let _ = err_reader.join();
+            // Don't join the helper threads: a descendant that left the group (setsid, a
+            // double fork) may still hold the pipes. They exit on their own once the pipes close.
             bail!(
                 "{program} did not finish within {} s",
                 self.timeout.as_secs()
@@ -161,11 +160,45 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(
-            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
-            "grandchild {pid} survived"
-        );
+        // Poll briefly: the killed grandchild may linger as a zombie until init reaps it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while process_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!process_alive(pid), "grandchild {pid} survived");
+    }
+
+    #[test]
+    fn timeout_returns_even_if_a_descendant_escapes_the_group() {
+        // The setsid'd sleep leaves the process group and keeps the stdout/stderr pipes open.
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let script = format!("setsid sleep 30 & echo $! > {}; wait", pidfile.display());
+        let started = std::time::Instant::now();
+        let result = sh(&script, 300).summarize("prompt");
+        let elapsed = started.elapsed();
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: plain syscall on the PID we recorded for the escaped sleep.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        assert!(result.is_err());
+        assert!(elapsed < Duration::from_secs(3), "blocked for {elapsed:?}");
+    }
+
+    /// Alive means present in /proc and not a zombie.
+    fn process_alive(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state letter follows the parenthesised command name.
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z')),
+            Err(_) => false,
+        }
     }
 
     #[test]
