@@ -1,0 +1,659 @@
+//! Decides when a call starts and ends, from PipeWire stream snapshots (spec section 5).
+//!
+//! Pure: no I/O, and time is the caller's monotonic clock in milliseconds.
+
+use crate::config::DetectConfig;
+use crate::pw::{App, Stream, StreamKind};
+use jiff::SignedDuration;
+use std::collections::BTreeSet;
+use std::fmt;
+
+/// A call that drops out for less than this is still alive: the Jitsi Meet app closes its
+/// pre-join mic stream and opens a new one on joining.
+pub const MIC_GAP_MS: u64 = 2_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    Idle,
+    Tentative,
+    Recording,
+    Grace,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Start capturing. `None` is a manual session.
+    Start { trigger: Option<App> },
+    /// Tentative becomes Recording.
+    Commit,
+    /// Finalize the capture and enqueue it.
+    Finish,
+    /// Delete the capture.
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectError {
+    AlreadyRecording,
+    NotRecording,
+}
+
+impl fmt::Display for DetectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            DetectError::AlreadyRecording => "already recording",
+            DetectError::NotRecording => "nothing is being recorded",
+        })
+    }
+}
+
+impl std::error::Error for DetectError {}
+
+pub struct Detector {
+    min_duration_ms: u64,
+    stop_grace_ms: u64,
+    /// Lowercased.
+    ignore_apps: Vec<String>,
+    /// Lowercased.
+    allow_apps: Option<Vec<String>>,
+    own_pid: u32,
+    phase: Phase,
+    manual: bool,
+    paused: bool,
+    trigger: Option<App>,
+    /// Serials of the trigger app's output streams seen while a mic stream was alive.
+    bound: BTreeSet<u64>,
+    /// The last snapshot, so `tick` can judge liveness between snapshots.
+    last: Vec<Stream>,
+    started_ms: u64,
+    /// When the session stopped being alive. Grace counts from here too.
+    dead_since: Option<u64>,
+}
+
+fn ms(d: SignedDuration) -> u64 {
+    d.as_millis().clamp(0, u64::MAX as i128) as u64
+}
+
+fn lowercase(rules: &[String]) -> Vec<String> {
+    rules.iter().map(|r| r.to_lowercase()).collect()
+}
+
+/// An app matches a rule when its name or its binary does, case-insensitively.
+fn matches(app: &App, rules: &[String]) -> bool {
+    [&app.name, &app.binary]
+        .into_iter()
+        .flatten()
+        .any(|v| rules.contains(&v.to_lowercase()))
+}
+
+impl Detector {
+    pub fn new(config: &DetectConfig, own_pid: u32) -> Detector {
+        Detector {
+            min_duration_ms: ms(config.min_duration),
+            stop_grace_ms: ms(config.stop_grace),
+            ignore_apps: lowercase(&config.ignore_apps),
+            allow_apps: config.allow_apps.as_deref().map(lowercase),
+            own_pid,
+            phase: Phase::Idle,
+            manual: false,
+            paused: false,
+            trigger: None,
+            bound: BTreeSet::new(),
+            last: Vec::new(),
+            started_ms: 0,
+            dead_since: None,
+        }
+    }
+
+    /// A new snapshot of the graph's streams. Ignored entirely while paused.
+    pub fn streams(&mut self, streams: &[Stream], now_ms: u64) -> Vec<Action> {
+        if self.paused {
+            return Vec::new();
+        }
+        self.last = streams.to_vec();
+        let mut actions = Vec::new();
+        if self.phase == Phase::Idle {
+            // Lowest serial first, since the graph sorts its streams but callers may not.
+            let Some(first) = self
+                .live_mics()
+                .min_by_key(|s| s.serial)
+                .map(|s| s.app.clone())
+            else {
+                return actions;
+            };
+            self.phase = Phase::Tentative;
+            self.trigger = Some(first.clone());
+            self.started_ms = now_ms;
+            actions.push(Action::Start {
+                trigger: Some(first),
+            });
+        }
+        actions.extend(self.advance(now_ms));
+        actions
+    }
+
+    /// Time passing without a new snapshot.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
+        self.advance(now_ms)
+    }
+
+    /// `kute record`: a manual session, or turns a Tentative one manual.
+    pub fn record(&mut self, now_ms: u64) -> Result<Vec<Action>, DetectError> {
+        match self.phase {
+            Phase::Recording | Phase::Grace => Err(DetectError::AlreadyRecording),
+            Phase::Tentative => {
+                self.phase = Phase::Recording;
+                self.manual = true;
+                self.dead_since = None;
+                Ok(vec![Action::Commit])
+            }
+            Phase::Idle => {
+                self.phase = Phase::Recording;
+                self.manual = true;
+                self.started_ms = now_ms;
+                Ok(vec![Action::Start { trigger: None }, Action::Commit])
+            }
+        }
+    }
+
+    /// `kute stop`: ends any session at once, a Tentative one included.
+    pub fn stop(&mut self) -> Result<Vec<Action>, DetectError> {
+        self.end(Action::Finish)
+    }
+
+    /// `kute discard`: ends the session and deletes it.
+    pub fn discard(&mut self) -> Result<Vec<Action>, DetectError> {
+        self.end(Action::Discard)
+    }
+
+    /// Stop listening: ends an automatic session; a manual one continues.
+    pub fn pause(&mut self) -> Vec<Action> {
+        self.paused = true;
+        self.last.clear();
+        if self.manual {
+            return Vec::new();
+        }
+        match self.phase {
+            Phase::Idle => Vec::new(),
+            Phase::Tentative => self.end(Action::Discard).unwrap_or_default(),
+            Phase::Recording | Phase::Grace => self.end(Action::Finish).unwrap_or_default(),
+        }
+    }
+
+    /// A call already in progress starts a new Tentative session on the next snapshot.
+    pub fn resume(&mut self) {
+        self.paused = false;
+    }
+
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn manual(&self) -> bool {
+        self.manual
+    }
+
+    pub fn trigger(&self) -> Option<&App> {
+        self.trigger.as_ref()
+    }
+
+    fn end(&mut self, action: Action) -> Result<Vec<Action>, DetectError> {
+        if self.phase == Phase::Idle {
+            return Err(DetectError::NotRecording);
+        }
+        self.phase = Phase::Idle;
+        self.manual = false;
+        self.trigger = None;
+        self.bound.clear();
+        self.started_ms = 0;
+        self.dead_since = None;
+        Ok(vec![action])
+    }
+
+    fn ignored(&self, s: &Stream) -> bool {
+        s.monitor
+            || s.pid == Some(self.own_pid)
+            || s.node_name
+                .as_deref()
+                .is_some_and(|n| n.starts_with("kute-"))
+            || matches(&s.app, &self.ignore_apps)
+            || self
+                .allow_apps
+                .as_deref()
+                .is_some_and(|allow| !matches(&s.app, allow))
+    }
+
+    fn live_mics(&self) -> impl Iterator<Item = &Stream> {
+        self.last
+            .iter()
+            .filter(|s| s.kind == StreamKind::Mic && !self.ignored(s))
+    }
+
+    /// Whether the last snapshot keeps the session alive, binding the trigger app's output
+    /// streams while a mic stream is there.
+    fn alive(&mut self) -> bool {
+        let mic = self.live_mics().next().is_some();
+        if mic && let Some(trigger) = &self.trigger {
+            let outputs = self
+                .last
+                .iter()
+                .filter(|s| s.kind == StreamKind::Output && s.app == *trigger)
+                .map(|s| s.serial);
+            self.bound.extend(outputs);
+        }
+        mic || self
+            .last
+            .iter()
+            .any(|s| s.kind == StreamKind::Output && s.running && self.bound.contains(&s.serial))
+    }
+
+    /// Moves an automatic session along: commits, confirms gaps, runs out the grace.
+    fn advance(&mut self, now_ms: u64) -> Vec<Action> {
+        if self.manual || self.phase == Phase::Idle {
+            return Vec::new();
+        }
+        let alive = self.alive();
+        if alive {
+            self.dead_since = None;
+        } else if self.dead_since.is_none() {
+            self.dead_since = Some(now_ms);
+        }
+        let dead = self
+            .dead_since
+            .is_some_and(|t| t.saturating_add(MIC_GAP_MS) <= now_ms);
+
+        match self.phase {
+            Phase::Tentative if dead => return self.end(Action::Discard).unwrap_or_default(),
+            Phase::Tentative => {
+                if alive && now_ms.saturating_sub(self.started_ms) >= self.min_duration_ms {
+                    self.phase = Phase::Recording;
+                    return vec![Action::Commit];
+                }
+            }
+            Phase::Recording if dead => self.phase = Phase::Grace,
+            Phase::Grace if alive => self.phase = Phase::Recording,
+            _ => {}
+        }
+        if self.phase == Phase::Grace
+            && let Some(since) = self.dead_since
+            && now_ms.saturating_sub(since) >= self.stop_grace_ms
+        {
+            return self.end(Action::Finish).unwrap_or_default();
+        }
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> DetectConfig {
+        DetectConfig::default()
+    }
+
+    fn app(name: &str, binary: &str) -> App {
+        App {
+            name: Some(name.into()),
+            binary: Some(binary.into()),
+        }
+    }
+
+    fn jitsi() -> App {
+        app("Jitsi Meet", "electron")
+    }
+
+    fn firefox() -> App {
+        app("Firefox", "firefox")
+    }
+
+    fn stream(serial: u64, kind: StreamKind, app: App, running: bool) -> Stream {
+        Stream {
+            serial,
+            kind,
+            app,
+            node_name: None,
+            pid: Some(1000 + serial as u32),
+            monitor: false,
+            running,
+        }
+    }
+
+    fn mic(serial: u64, app: App) -> Stream {
+        stream(serial, StreamKind::Mic, app, true)
+    }
+
+    fn out(serial: u64, app: App, running: bool) -> Stream {
+        stream(serial, StreamKind::Output, app, running)
+    }
+
+    fn meter(serial: u64) -> Stream {
+        Stream {
+            node_name: Some("PlasmaPA-VolumeMeter".into()),
+            monitor: true,
+            ..mic(
+                serial,
+                App {
+                    name: None,
+                    binary: Some("plasmashell".into()),
+                },
+            )
+        }
+    }
+
+    fn kute(serial: u64) -> Stream {
+        Stream {
+            node_name: Some("kute-me".into()),
+            ..mic(
+                serial,
+                App {
+                    name: None,
+                    binary: Some("pw-record".into()),
+                },
+            )
+        }
+    }
+
+    /// A detector in Recording, started by Jitsi at 0 with mic 88 and output 114.
+    fn recording() -> Detector {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 0);
+        assert_eq!(d.tick(20_000), vec![Action::Commit]);
+        d
+    }
+
+    #[test]
+    fn website_mic_check_is_discarded() {
+        let mut d = Detector::new(&cfg(), 1);
+        assert!(matches!(
+            d.streams(&[mic(10, firefox())], 0)[..],
+            [Action::Start { .. }]
+        ));
+        assert_eq!(d.phase(), Phase::Tentative);
+        assert!(d.streams(&[], 5_000).is_empty()); // gap not yet confirmed
+        assert!(d.tick(6_999).is_empty());
+        assert_eq!(d.tick(7_000), vec![Action::Discard]); // 5 s + 2 s
+        assert_eq!(d.phase(), Phase::Idle);
+        assert_eq!(d.trigger(), None);
+    }
+
+    #[test]
+    fn start_names_the_lowest_serial_mic_app() {
+        let mut d = Detector::new(&cfg(), 1);
+        let actions = d.streams(&[mic(30, firefox()), mic(12, jitsi())], 0);
+        assert_eq!(
+            actions,
+            vec![Action::Start {
+                trigger: Some(jitsi())
+            }]
+        );
+        assert_eq!(d.trigger(), Some(&jitsi()));
+        assert!(!d.manual());
+    }
+
+    #[test]
+    fn jitsi_lobby_to_call_is_one_session() {
+        // Pre-join mic closes, the call's mic opens 0.5 s later.
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(85, jitsi())], 0);
+        d.streams(&[], 11_000);
+        assert!(
+            d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 11_500)
+                .is_empty()
+        );
+        assert!(d.tick(19_999).is_empty());
+        assert_eq!(d.tick(20_000), vec![Action::Commit]);
+        assert_eq!(d.phase(), Phase::Recording);
+    }
+
+    #[test]
+    fn call_commits_then_finishes_after_grace() {
+        let mut d = recording();
+        // Leaving the room: the mic closes and the output idles.
+        assert!(d.streams(&[out(114, jitsi(), false)], 100_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.tick(102_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert!(d.tick(114_999).is_empty());
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
+        assert_eq!(d.phase(), Phase::Idle);
+        assert_eq!(d.trigger(), None);
+    }
+
+    #[test]
+    fn grace_returns_to_recording_when_alive_again() {
+        let mut d = recording();
+        d.streams(&[], 100_000);
+        d.tick(103_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        assert!(d.streams(&[mic(90, jitsi())], 110_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.tick(200_000).is_empty());
+    }
+
+    #[test]
+    fn bound_output_keeps_session_alive_only_while_running() {
+        let mut d = recording();
+        // The app closes its mic on mute; the output keeps running.
+        assert!(d.streams(&[out(114, jitsi(), true)], 100_000).is_empty());
+        for t in (101..=160).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+            assert_eq!(d.phase(), Phase::Recording);
+        }
+        assert!(d.streams(&[out(114, jitsi(), false)], 160_000).is_empty());
+        assert!(d.tick(162_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(175_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn new_output_node_after_the_call_does_not_count() {
+        let mut d = recording();
+        d.streams(&[out(114, jitsi(), false)], 100_000);
+        // Same app, new node, appearing after the mic closed.
+        assert!(
+            d.streams(
+                &[out(114, jitsi(), false), out(200, jitsi(), true)],
+                101_000
+            )
+            .is_empty()
+        );
+        assert!(d.tick(102_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn output_of_another_app_is_not_bound() {
+        let mut d = Detector::new(&cfg(), 1);
+        // Same binary, different name: not the trigger app.
+        let other = app("Signal", "electron");
+        d.streams(&[mic(88, jitsi()), out(120, other.clone(), true)], 0);
+        d.tick(20_000);
+        d.streams(&[out(120, other, true)], 100_000);
+        assert!(d.tick(102_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+    }
+
+    #[test]
+    fn peak_meters_never_start_a_session() {
+        let mut d = Detector::new(&cfg(), 1);
+        assert!(d.streams(&[meter(1), meter(2)], 0).is_empty());
+        for t in (1..=60).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        assert_eq!(d.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn own_capture_streams_are_ignored() {
+        let own = Stream {
+            pid: Some(4242),
+            ..mic(7, firefox())
+        };
+        let mut d = Detector::new(&cfg(), 4242);
+        assert!(d.streams(&[kute(5), own.clone()], 0).is_empty());
+        assert!(d.tick(60_000).is_empty());
+        assert_eq!(d.phase(), Phase::Idle);
+
+        // During a session they don't keep it alive either.
+        d.streams(&[mic(88, jitsi())], 100_000);
+        assert_eq!(d.tick(120_000), vec![Action::Commit]);
+        d.streams(&[kute(5), own, meter(3)], 130_000);
+        d.tick(132_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(145_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn ignore_and_allow_apps_match_name_or_binary() {
+        let ignore = DetectConfig {
+            ignore_apps: vec!["ELECTRON".into()],
+            ..cfg()
+        };
+        let mut d = Detector::new(&ignore, 1);
+        assert!(d.streams(&[mic(88, jitsi())], 0).is_empty());
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi()), mic(90, firefox())], 1_000)[..],
+            [Action::Start { .. }]
+        ));
+        assert_eq!(d.trigger(), Some(&firefox()));
+
+        let allow = DetectConfig {
+            allow_apps: Some(vec!["jitsi meet".into()]),
+            ..cfg()
+        };
+        let mut d = Detector::new(&allow, 1);
+        assert!(d.streams(&[mic(90, firefox())], 0).is_empty());
+        assert_eq!(
+            d.streams(&[mic(90, firefox()), mic(91, jitsi())], 1_000),
+            vec![Action::Start {
+                trigger: Some(jitsi())
+            }]
+        );
+    }
+
+    #[test]
+    fn manual_record_ignores_liveness() {
+        let mut d = Detector::new(&cfg(), 1);
+        assert_eq!(
+            d.record(0),
+            Ok(vec![Action::Start { trigger: None }, Action::Commit])
+        );
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.manual());
+        assert_eq!(d.trigger(), None);
+        for t in (1..=600).map(|s| s * 1_000) {
+            assert!(d.streams(&[], t).is_empty());
+            assert!(d.tick(t).is_empty());
+        }
+        assert_eq!(d.phase(), Phase::Recording);
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        assert_eq!(d.phase(), Phase::Idle);
+        assert!(!d.manual());
+        assert_eq!(d.stop(), Err(DetectError::NotRecording));
+        assert_eq!(d.discard(), Err(DetectError::NotRecording));
+    }
+
+    #[test]
+    fn record_during_tentative_commits_as_manual() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(10, firefox())], 0);
+        assert_eq!(d.record(3_000), Ok(vec![Action::Commit]));
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.manual());
+        // The mic closing no longer ends it.
+        d.streams(&[], 4_000);
+        assert!(d.tick(60_000).is_empty());
+        assert_eq!(d.discard(), Ok(vec![Action::Discard]));
+        assert_eq!(d.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn record_while_recording_fails() {
+        let mut d = recording();
+        assert_eq!(d.record(30_000), Err(DetectError::AlreadyRecording));
+        d.streams(&[], 100_000);
+        d.tick(102_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.record(103_000), Err(DetectError::AlreadyRecording));
+
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        assert_eq!(d.record(1_000), Err(DetectError::AlreadyRecording));
+    }
+
+    #[test]
+    fn stop_ends_automatic_sessions_at_once() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(10, firefox())], 0);
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        assert_eq!(d.phase(), Phase::Idle);
+
+        let mut d = recording();
+        assert_eq!(d.discard(), Ok(vec![Action::Discard]));
+        assert_eq!(d.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn pause_ends_automatic_sessions_and_ignores_streams() {
+        let mut d = recording();
+        assert_eq!(d.pause(), vec![Action::Finish]);
+        assert!(d.paused());
+        assert_eq!(d.phase(), Phase::Idle);
+        assert!(d.streams(&[mic(88, jitsi())], 30_000).is_empty());
+        assert!(d.tick(60_000).is_empty());
+        assert_eq!(d.phase(), Phase::Idle);
+
+        d.resume();
+        assert!(!d.paused());
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi())], 61_000)[..],
+            [Action::Start { .. }]
+        ));
+
+        // Tentative is discarded.
+        assert_eq!(d.pause(), vec![Action::Discard]);
+    }
+
+    #[test]
+    fn manual_sessions_survive_pause_and_work_while_paused() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        assert!(d.pause().is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        assert!(d.paused());
+
+        assert_eq!(
+            d.record(5_000),
+            Ok(vec![Action::Start { trigger: None }, Action::Commit])
+        );
+        assert_eq!(d.discard(), Ok(vec![Action::Discard]));
+    }
+
+    #[test]
+    fn error_messages() {
+        assert_eq!(
+            DetectError::AlreadyRecording.to_string(),
+            "already recording"
+        );
+        assert_eq!(
+            DetectError::NotRecording.to_string(),
+            "nothing is being recorded"
+        );
+    }
+
+    #[test]
+    fn phase_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Phase::Tentative).unwrap(),
+            "\"tentative\""
+        );
+    }
+}

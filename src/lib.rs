@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod cli;
 pub mod config;
+pub mod detect;
 pub mod import;
 pub mod index;
 pub mod merge;
