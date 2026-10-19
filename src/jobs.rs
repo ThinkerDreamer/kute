@@ -43,6 +43,20 @@ pub enum Job {
     Reindex,
 }
 
+impl Job {
+    /// The session the job works on; `None` for an import (its session doesn't exist yet)
+    /// and a reindex.
+    pub fn session(&self) -> Option<&str> {
+        match self {
+            Job::Process { id }
+            | Job::Retranscribe { id, .. }
+            | Job::Summarize { id, .. }
+            | Job::Title { id, .. } => Some(id),
+            Job::Import { .. } | Job::Reindex => None,
+        }
+    }
+}
+
 /// A short description for logs and `kute status`, e.g. "process 2026-10-08T090312".
 impl std::fmt::Display for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

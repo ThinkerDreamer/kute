@@ -11,6 +11,7 @@ use crate::ipc::{self, Incoming, Request, Response, Status};
 use crate::jobs::Job;
 use crate::live::{self, LiveSession, StartRequest};
 use crate::models;
+use crate::pipeline;
 use crate::pw::{self, App, MonitorEvent, Snapshot};
 use crate::recorder::VadFactory;
 use crate::store::Store;
@@ -46,6 +47,9 @@ pub struct Daemon {
     running: Option<Job>,
     /// Processing to run again once its time (daemon ms) comes, after failed transcriptions.
     retries: Vec<(u64, Job)>,
+    /// Sessions discarded while a job was running: that job may index them again before
+    /// it notices the folder is gone, so they leave the index once more when it ends.
+    discarded: Vec<String>,
     worker: Sender<WorkerMsg>,
     source: Box<dyn CaptureSource>,
     vad: VadFactory,
@@ -68,6 +72,7 @@ impl Daemon {
             queue: VecDeque::new(),
             running: None,
             retries: Vec::new(),
+            discarded: Vec::new(),
             worker,
             source,
             vad,
@@ -233,8 +238,14 @@ impl Daemon {
             Ok(_) => eprintln!("kute: {}: done", done.job),
             Err(e) => eprintln!("kute: {} failed: {e}", done.job),
         }
+        let discarded = std::mem::take(&mut self.discarded);
+        for id in &discarded {
+            unindex(&self.store, id);
+        }
         // Always `Process`, even after an `Import`: the session exists now.
-        if let (Some(delay), Some(id)) = (done.retry_after, done.session) {
+        if let (Some(delay), Some(id)) = (done.retry_after, done.session)
+            && !discarded.contains(&id)
+        {
             eprintln!("kute: transcribing {id} again in {} s", delay.as_secs());
             let at = now_ms.saturating_add(delay.as_millis() as u64);
             self.retries.push((at, Job::Process { id }));
@@ -298,10 +309,22 @@ impl Daemon {
                     let id = live.id().to_owned();
                     live.discard().with_context(|| format!("discarding {id}"))?;
                     eprintln!("kute: discarded {id}");
+                    self.forget(&id);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Drops what is left of a discarded session: the work queued for it and its rows in
+    /// the search index (its closed conversations may already be transcribed).
+    fn forget(&mut self, id: &str) {
+        self.queue.retain(|job| job.session() != Some(id));
+        self.retries.retain(|(_, job)| job.session() != Some(id));
+        if self.running.is_some() {
+            self.discarded.push(id.to_owned());
+        }
+        unindex(&self.store, id);
     }
 
     fn start(&mut self, trigger: Option<App>) -> Result<()> {
@@ -350,6 +373,15 @@ impl Daemon {
             .as_ref()
             .map(|l| l.id().to_owned())
             .unwrap_or_default()
+    }
+}
+
+/// Removes a session from the search index. A failure is only logged: the session is gone
+/// either way, and `kute reindex` rebuilds the index from what is on disk.
+fn unindex(store: &Store, id: &str) {
+    let removed = pipeline::open_index(store).and_then(|index| index.delete_session(id));
+    if let Err(e) = removed {
+        eprintln!("kute: removing {id} from the search index: {e:#}");
     }
 }
 

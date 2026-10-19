@@ -6,10 +6,12 @@ use kute::capture::{Capture, CaptureSource};
 use kute::config::Config;
 use kute::daemon::{Daemon, Event};
 use kute::detect::Phase;
+use kute::index::Index;
 use kute::ipc::{Incoming, Request, Response};
 use kute::jobs::{Job, Outcome};
+use kute::merge::Line;
 use kute::pw::{App, MonitorEvent, Snapshot, Source, Stream, StreamKind};
-use kute::store::{SessionState, Store, Track, TriggerKind};
+use kute::store::{Meta, SessionState, Store, Track, Trigger, TriggerKind};
 use kute::testing::{FakeSource, run_vad};
 use kute::worker::{WorkerDone, WorkerMsg};
 use std::io::Write;
@@ -499,11 +501,9 @@ fn a_capture_that_ends_on_its_own_finishes_the_session() {
     assert_eq!(h.sent(), vec![Job::Process { id }]);
 }
 
-#[test]
-fn a_conversation_that_closes_mid_call_is_processed_while_recording() {
-    let mut config = Config::default();
-    config.detect.conversation_gap = jiff::SignedDuration::from_secs(10);
-    let mut h = Harness::with(config, |source| Box::new(source));
+/// A manual session with a 10 s conversation gap whose first conversation has closed,
+/// so a `Process` for it is running on the worker. Returns the session ID.
+fn record_until_a_conversation_closes(h: &mut Harness) -> String {
     h.ok(Request::Record { title: None });
     let id = h.daemon.status().session.unwrap();
     let writers = [
@@ -526,8 +526,89 @@ fn a_conversation_that_closes_mid_call_is_processed_while_recording() {
         sent = h.sent();
     }
     assert_eq!(sent, vec![Job::Process { id: id.clone() }]);
+    id
+}
+
+fn gap_10s() -> Config {
+    let mut config = Config::default();
+    config.detect.conversation_gap = jiff::SignedDuration::from_secs(10);
+    config
+}
+
+#[test]
+fn a_conversation_that_closes_mid_call_is_processed_while_recording() {
+    let mut h = Harness::with(gap_10s(), |source| Box::new(source));
+    let id = record_until_a_conversation_closes(&mut h);
     assert_eq!(h.phase(), Phase::Recording);
     let meta = h.store.session(&id).unwrap().load_meta().unwrap();
     assert_eq!(meta.state, SessionState::Recording);
     assert_eq!(meta.conversations.len(), 1);
+}
+
+/// What the worker's pipeline writes to the index for a transcribed conversation.
+fn index_a_line(store: &Store, id: &str, text: &str) {
+    let index = Index::open(&store.index_path()).unwrap();
+    let meta = Meta::new(
+        id.into(),
+        "2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap(),
+        Trigger {
+            kind: TriggerKind::Manual,
+            app_name: None,
+            binary: None,
+        },
+        "auto".into(),
+    );
+    index.upsert_session(&meta).unwrap();
+    let line = Line {
+        start_ms: 1_000,
+        track: Track::Me,
+        text: text.into(),
+    };
+    index.replace_lines(id, 1, &[line]).unwrap();
+}
+
+fn search(store: &Store, query: &str) -> Vec<String> {
+    let index = Index::open(&store.index_path()).unwrap();
+    let hits = index.search(query, 10).unwrap();
+    hits.into_iter().map(|h| h.session_id).collect()
+}
+
+#[test]
+fn discard_removes_the_session_from_the_index_and_drops_its_jobs() {
+    let mut h = Harness::with(gap_10s(), |source| Box::new(source));
+    let id = record_until_a_conversation_closes(&mut h);
+    // The worker transcribes conversation 1, indexes it, and fails another one.
+    index_a_line(&h.store, &id, "budget");
+    assert_eq!(search(&h.store, "budget"), [id.as_str()]);
+    let process = Job::Process { id: id.clone() };
+    h.done(process.clone(), Some(&id), Some(Duration::from_secs(60)));
+    // More work for the session: one job running, one waiting, plus a job for another.
+    let summarize = Job::Summarize {
+        id: id.clone(),
+        conversation: None,
+        lang: None,
+        backend: None,
+    };
+    h.ok(Request::Job {
+        job: summarize.clone(),
+    });
+    h.ok(Request::Job {
+        job: process.clone(),
+    });
+    h.ok(Request::Job { job: Job::Reindex });
+    assert_eq!(h.sent(), vec![summarize.clone()]);
+
+    assert_eq!(h.ok(Request::Discard), format!("discarded {id}"));
+    assert!(search(&h.store, "budget").is_empty());
+    let status = h.daemon.status();
+    assert_eq!(status.queued, 1);
+
+    // The running job indexed the session again before it noticed the folder was gone.
+    index_a_line(&h.store, &id, "budget");
+    h.done(summarize, Some(&id), Some(Duration::from_secs(60)));
+    assert!(search(&h.store, "budget").is_empty());
+    assert_eq!(h.sent(), vec![Job::Reindex]);
+    h.done(Job::Reindex, None, None);
+    h.tick_until(h.now + 120_000);
+    assert!(h.sent().is_empty());
 }
