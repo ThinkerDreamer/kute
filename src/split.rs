@@ -23,6 +23,11 @@ impl Splitter {
     }
 
     /// Speech on either track, in session time.
+    ///
+    /// Ordering contract: feed each track's events in the order it produced them, and
+    /// call `advance` for an `Analysed` before feeding any `Speech` that came after it.
+    /// Speech fed after the gap was analysed would otherwise extend a conversation that
+    /// should have closed.
     pub fn speech(&mut self, start_ms: u64, end_ms: u64) -> Option<SplitEvent> {
         match &mut self.open {
             Some((_, last_end)) => {

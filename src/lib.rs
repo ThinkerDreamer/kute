@@ -7,6 +7,7 @@ pub mod config;
 pub mod detect;
 pub mod import;
 pub mod index;
+pub mod live;
 pub mod merge;
 pub mod models;
 pub mod pipeline;

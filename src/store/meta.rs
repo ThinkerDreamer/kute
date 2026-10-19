@@ -70,6 +70,13 @@ impl Tracks {
             Track::Others => &self.others,
         }
     }
+
+    pub fn get_mut(&mut self, track: Track) -> &mut TrackMeta {
+        match track {
+            Track::Me => &mut self.me,
+            Track::Others => &mut self.others,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

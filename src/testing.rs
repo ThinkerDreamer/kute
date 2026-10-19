@@ -1,11 +1,15 @@
 //! Test fakes shared by the unit tests and the integration tests in `tests/`, which
 //! can't see `#[cfg(test)]` items. Not part of kute's API.
 
+use crate::capture::{Capture, CaptureSource};
 use crate::recorder::VadFactory;
+use crate::store::Track;
 use crate::transcribe::{Span, SpeechDetector};
 use anyhow::Result;
+use std::collections::HashMap;
+use std::io::{self, PipeWriter, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Speech is any 10 ms frame with a non-zero sample: one span per run of such frames.
 pub struct RunVad;
@@ -45,4 +49,50 @@ pub fn crash_wav(path: &Path) {
     bytes[4..8].fill(0);
     bytes[data + 4..data + 8].fill(0);
     std::fs::write(path, bytes).unwrap();
+}
+
+/// Captures backed by pipes: a test writes a track's PCM through `writer`, and stopping
+/// the capture closes the pipe, so the track thread sees EOF. Clones share the pipes.
+#[derive(Clone, Default)]
+pub struct FakeSource {
+    pipes: Arc<Mutex<HashMap<Track, PipeSlot>>>,
+}
+
+/// The write end of one capture's pipe; `None` once the capture is stopped.
+type PipeSlot = Arc<Mutex<Option<PipeWriter>>>;
+
+impl FakeSource {
+    /// Writes into the last capture opened for `track`. Panics if there is none.
+    pub fn writer(&self, track: Track) -> FakeWriter {
+        let pipes = self.pipes.lock().unwrap();
+        let slot = pipes.get(&track).expect("capture not opened");
+        FakeWriter(slot.clone())
+    }
+}
+
+impl CaptureSource for FakeSource {
+    fn open(&self, track: Track, _target: Option<&str>) -> Result<Capture> {
+        let (reader, writer) = io::pipe()?;
+        let slot: PipeSlot = Arc::new(Mutex::new(Some(writer)));
+        self.pipes.lock().unwrap().insert(track, slot.clone());
+        Ok(Capture::new(Box::new(reader), move || {
+            slot.lock().unwrap().take();
+        }))
+    }
+}
+
+/// Fails with `BrokenPipe` once the capture is stopped.
+pub struct FakeWriter(PipeSlot);
+
+impl Write for FakeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.0.lock().unwrap().as_mut() {
+            Some(w) => w.write(buf),
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
