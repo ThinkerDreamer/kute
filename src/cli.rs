@@ -139,8 +139,9 @@ pub fn run() -> Result<()> {
             &store,
             &config,
             &Job::Import {
-                me,
-                others,
+                // Absolute, so the job means the same files wherever it runs.
+                me: std::path::absolute(&me)?,
+                others: std::path::absolute(&others)?,
                 start,
                 title,
                 process: !no_process,

@@ -7,7 +7,7 @@ use crate::index::Index;
 use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
 use crate::store::{Meta, Session, Stage, Step, Store};
 use crate::summarize;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub enum Job {
         lang: Option<String>,
         backend: Option<SummaryBackend>,
     },
-    /// `me` and `others` are used as given; the CLI makes them absolute before sending.
+    /// `me` and `others` are used as given; the CLI makes them absolute.
     Import {
         me: PathBuf,
         others: PathBuf,
@@ -155,7 +155,9 @@ pub fn run(
             let mut message = format!("imported {}", session.id);
             if *process {
                 let provider = provider(asr, config, store)?;
-                let report = run_pipeline(store, config, &session, Some(provider), Work::Process)?;
+                // The session exists now, so a processing error must still say which one.
+                let report = run_pipeline(store, config, &session, Some(provider), Work::Process)
+                    .with_context(|| format!("imported {}", session.id))?;
                 if !report.is_empty() {
                     message = format!("{message}\n{report}");
                 }
@@ -261,6 +263,10 @@ fn check_report(session: &Session, report: &Report) -> Result<String> {
         eprintln!("kute: compression failed (audio kept as WAV): {e}");
     }
     if !report.failed.is_empty() {
+        // What did get written is still worth showing, as before the failure count.
+        for line in &lines {
+            println!("{line}");
+        }
         for (n, e) in &report.failed {
             eprintln!("kute: conversation {n} failed: {e}");
         }
@@ -331,5 +337,54 @@ mod tests {
         assert_eq!(value["job"], "summarize");
         assert_eq!(value["conversation"], 2);
         assert_eq!(serde_json::from_value::<Job>(value).unwrap(), job);
+    }
+
+    #[test]
+    fn a_failed_import_processing_names_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        // Model files only need to exist: the prompt template fails before they are loaded.
+        let model = tmp.path().join("fake.bin");
+        std::fs::write(&model, b"").unwrap();
+        let vad = crate::models::path_for(&store.models_dir(), &crate::models::VAD_MODEL);
+        std::fs::create_dir_all(vad.parent().unwrap()).unwrap();
+        std::fs::write(&vad, b"").unwrap();
+        let mut config = Config::default();
+        config.transcribe.model = model.to_string_lossy().into_owned();
+        config.summary.prompt = Some(tmp.path().join("missing-prompt.md"));
+        let wav = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/me.wav"
+        ));
+        let job = Job::Import {
+            me: wav.clone(),
+            others: wav,
+            start: Some("2026-10-08T15:00:00".into()),
+            title: None,
+            process: true,
+        };
+
+        let err = run(&store, &config, &mut None, &job).unwrap_err();
+        let id = &store.list().unwrap()[0].id;
+        let text = format!("{err:#}");
+        assert!(text.starts_with(&format!("imported {id}: ")), "{text}");
+        assert!(text.contains("prompt template"), "{text}");
+    }
+
+    #[test]
+    fn conversations_failed_survives_the_import_context() {
+        let err = anyhow::Error::from(ConversationsFailed {
+            session: "s".into(),
+            count: 1,
+        })
+        .context("imported s");
+        assert_eq!(
+            err.downcast_ref::<ConversationsFailed>().unwrap().session,
+            "s"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            "imported s: 1 conversation(s) failed; fix the cause and run `kute process s`"
+        );
     }
 }
