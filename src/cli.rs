@@ -4,7 +4,7 @@ use crate::config::{Config, SummaryBackend};
 use crate::daemon;
 use crate::index::HitKind;
 use crate::ipc::{self, Request, Response, Status};
-use crate::jobs::{self, Job};
+use crate::jobs::{self, ConversationsFailed, Job};
 use crate::models;
 use crate::pipeline;
 use crate::render;
@@ -373,7 +373,14 @@ fn run_job(store: &Store, config: &Config, job: &Job) -> Result<()> {
 
 /// Runs a processing job in the foreground and prints what it reports.
 fn run_foreground(store: &Store, config: &Config, job: &Job) -> Result<()> {
-    let outcome = jobs::run(store, config, &mut None, job)?;
+    let outcome = jobs::run(store, config, &mut None, job).inspect_err(|e| {
+        // What did get written is still worth showing, before the error.
+        if let Some(failed) = e.downcast_ref::<ConversationsFailed>() {
+            for line in &failed.written {
+                println!("{line}");
+            }
+        }
+    })?;
     if !outcome.message.is_empty() {
         println!("{}", outcome.message);
     }

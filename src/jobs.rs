@@ -84,6 +84,9 @@ pub struct Outcome {
 pub struct ConversationsFailed {
     pub session: String,
     pub count: usize,
+    /// Where the transcript and summary of the rest are, as `kute process` prints them on
+    /// success. Left to the caller, since the daemon's stdout goes nowhere.
+    pub written: Vec<String>,
 }
 
 impl std::fmt::Display for ConversationsFailed {
@@ -291,16 +294,13 @@ fn check_report(session: &Session, report: &Report) -> Result<String> {
         eprintln!("kute: compression failed (audio kept as WAV): {e}");
     }
     if !report.failed.is_empty() {
-        // What did get written is still worth showing, as before the failure count.
-        for line in &lines {
-            println!("{line}");
-        }
         for (n, e) in &report.failed {
             eprintln!("kute: conversation {n} failed: {e}");
         }
         return Err(ConversationsFailed {
             session: session.id.clone(),
             count: report.failed.len(),
+            written: lines,
         }
         .into());
     }
@@ -400,10 +400,34 @@ mod tests {
     }
 
     #[test]
+    fn what_was_written_before_a_failure_travels_in_the_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let session = store
+            .create_session(&"2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap())
+            .unwrap();
+        std::fs::write(session.transcript_path(), "# Call").unwrap();
+        let report = Report {
+            failed: vec![(2, "no model".into())],
+            ..Report::default()
+        };
+        let err = check_report(&session, &report).unwrap_err();
+        let failed = err.downcast_ref::<ConversationsFailed>().unwrap();
+        assert_eq!(
+            failed.written,
+            [format!(
+                "transcript: {}",
+                session.transcript_path().display()
+            )]
+        );
+    }
+
+    #[test]
     fn conversations_failed_survives_the_import_context() {
         let err = anyhow::Error::from(ConversationsFailed {
             session: "s".into(),
             count: 1,
+            written: Vec::new(),
         })
         .context("imported s");
         assert_eq!(

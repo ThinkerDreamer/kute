@@ -63,6 +63,13 @@ fn spawn_with(
                         Err(anyhow::anyhow!("job panicked: {}", panic_message(&*panic)))
                     }
                 };
+                if let Err(e) = &result
+                    && let Some(failed) = e.downcast_ref::<ConversationsFailed>()
+                {
+                    for line in &failed.written {
+                        eprintln!("kute: {}: {line}", failed.session);
+                    }
+                }
                 let session = session_of(&result);
                 let retry_after = session
                     .as_deref()
