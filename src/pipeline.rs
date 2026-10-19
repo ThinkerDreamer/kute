@@ -83,11 +83,11 @@ pub struct Pipeline<'a> {
 }
 
 impl Pipeline<'_> {
+    /// Works on the conversations in `meta.toml` when it starts. A session that is still
+    /// recording is fine: its listed conversations are closed (the open one is only
+    /// `open_conversation_ms`), and the live session may append more while this runs.
     pub fn process(&mut self, session: &Session) -> Result<Report> {
         let mut meta = session.load_meta()?;
-        if meta.state == SessionState::Recording {
-            bail!("session {} is still recording", meta.id);
-        }
         remove_temp_files(session)?;
         let mut report = Report::default();
         let ns: Vec<u32> = meta.conversations.iter().map(|c| c.n).collect();
@@ -110,7 +110,7 @@ impl Pipeline<'_> {
                         meta.conversation_mut(n)
                             .expect("n comes from meta")
                             .fail(Step::Transcribe, &e);
-                        session.save_meta(&meta)?;
+                        meta = save_conversation(session, &meta, n)?;
                         report.failed.push((n, format!("{e:#}")));
                     }
                 }
@@ -131,7 +131,7 @@ impl Pipeline<'_> {
                     meta.conversation_mut(n)
                         .expect("n comes from meta")
                         .fail(Step::Summarize, &e);
-                    session.save_meta(&meta)?;
+                    meta = save_conversation(session, &meta, n)?;
                     report.failed.push((n, format!("{e:#}")));
                 }
             }
@@ -146,7 +146,7 @@ impl Pipeline<'_> {
     /// Transcribes and summarizes every conversation again from the stored audio (Opus
     /// after compression).
     pub fn retranscribe(&mut self, session: &Session) -> Result<Report> {
-        let mut meta = session.load_meta()?;
+        let meta = session.load_meta()?;
         if meta.state == SessionState::Recording {
             bail!("session {} is still recording", meta.id);
         }
@@ -155,11 +155,12 @@ impl Pipeline<'_> {
         if let Some(asr) = self.asr.as_deref_mut() {
             asr.get().context("loading the transcription models")?;
         }
-        for c in &mut meta.conversations {
-            let (n, start_ms, end_ms) = (c.n, c.start_ms, c.end_ms);
-            *c = crate::store::Conversation::new(n, start_ms, end_ms);
-        }
-        session.save_meta(&meta)?;
+        session.update_meta(|m| {
+            for c in &mut m.conversations {
+                let (n, start_ms, end_ms) = (c.n, c.start_ms, c.end_ms);
+                *c = crate::store::Conversation::new(n, start_ms, end_ms);
+            }
+        })?;
         self.process(session)
     }
 
@@ -170,7 +171,7 @@ impl Pipeline<'_> {
                 "no summarizer is configured (summary.backend = \"none\"); set one in the config or pass --backend"
             );
         }
-        let mut meta = session.load_meta()?;
+        let meta = session.load_meta()?;
         if let Some(n) = only {
             let c = meta
                 .conversation(n)
@@ -182,14 +183,15 @@ impl Pipeline<'_> {
                 );
             }
         }
-        for c in &mut meta.conversations {
-            if only.is_some_and(|n| n != c.n) || c.needs_transcription() {
-                continue;
+        session.update_meta(|m| {
+            for c in &mut m.conversations {
+                if only.is_some_and(|n| n != c.n) || c.needs_transcription() {
+                    continue;
+                }
+                c.stage = Stage::Transcribed;
+                c.clear_error();
             }
-            c.stage = Stage::Transcribed;
-            c.clear_error();
-        }
-        session.save_meta(&meta)?;
+        })?;
         self.process(session)
     }
 
@@ -253,7 +255,7 @@ impl Pipeline<'_> {
         c.stage = Stage::Transcribed;
         c.whisper_model = Some(model);
         c.clear_error();
-        session.save_meta(meta)?;
+        *meta = save_conversation(session, meta, n)?;
         write_documents(session, meta, &self.config.labels)?;
         index_session(self.index, session)
     }
@@ -280,7 +282,7 @@ impl Pipeline<'_> {
                 let c = meta.conversation_mut(n).expect("n comes from meta");
                 c.stage = Stage::Skipped;
                 c.clear_error();
-                session.save_meta(meta)?;
+                *meta = save_conversation(session, meta, n)?;
                 return Ok(false);
             }
         };
@@ -313,7 +315,7 @@ impl Pipeline<'_> {
         c.stage = Stage::Summarized;
         c.summarizer = Some(summarizer.name());
         c.clear_error();
-        session.save_meta(meta)?;
+        *meta = save_conversation(session, meta, n)?;
         write_documents(session, meta, labels)?;
         index_session(self.index, session)?;
         Ok(true)
@@ -325,6 +327,8 @@ impl Pipeline<'_> {
         meta: &mut Meta,
         report: &mut Report,
     ) -> Result<()> {
+        // The recording may have ended, or added conversations, since `meta` was read.
+        *meta = session.load_meta()?;
         if meta.compression.stage == CompressionStage::Done
             || meta.ended_at.is_none()
             || !meta.conversations.iter().all(|c| c.is_settled())
@@ -332,21 +336,35 @@ impl Pipeline<'_> {
             return Ok(());
         }
         note(self.quiet, &format!("{}: compressing audio", meta.id));
-        match compress_tracks(session) {
+        let result = compress_tracks(session);
+        *meta = session.update_meta(|m| match &result {
             Ok(()) => {
-                meta.compression.stage = CompressionStage::Done;
-                meta.compression.error = None;
-                meta.state = SessionState::Done;
-                report.compressed = true;
+                m.compression.stage = CompressionStage::Done;
+                m.compression.error = None;
+                m.state = SessionState::Done;
             }
             Err(e) => {
-                meta.compression.stage = CompressionStage::Failed;
-                meta.compression.error = Some(format!("{e:#}"));
-                report.compression_error = Some(format!("{e:#}"));
+                m.compression.stage = CompressionStage::Failed;
+                m.compression.error = Some(format!("{e:#}"));
             }
+        })?;
+        match result {
+            Ok(()) => report.compressed = true,
+            Err(e) => report.compression_error = Some(format!("{e:#}")),
         }
-        session.save_meta(meta)
+        Ok(())
     }
+}
+
+/// Writes conversation `n` from `meta` into `meta.toml` and leaves everything else as it is on
+/// disk, so conversations the live session appended meanwhile survive. Returns the saved meta.
+fn save_conversation(session: &Session, meta: &Meta, n: u32) -> Result<Meta> {
+    let conv = meta.conversation(n).expect("n comes from meta").clone();
+    session.update_meta(|m| {
+        if let Some(c) = m.conversation_mut(n) {
+            *c = conv;
+        }
+    })
 }
 
 /// Encodes both WAVs to Opus and checks durations; deletes the WAVs only when both passed.
@@ -659,13 +677,13 @@ mod tests {
     fn pipeline<'a>(
         f: &'a Fixture,
         asr: &'a mut FakeProvider,
-        summarizer: Option<&'a FakeSummarizer>,
+        summarizer: Option<&'a dyn Summarizer>,
     ) -> Pipeline<'a> {
         Pipeline {
             index: &f.index,
             config: &f.config,
             asr: Some(asr),
-            summarizer: summarizer.map(|s| s as &dyn Summarizer),
+            summarizer,
             template: crate::summarize::DEFAULT_PROMPT.to_string(),
             quiet: true,
         }
@@ -855,10 +873,72 @@ mod tests {
                 .is_err()
         );
 
-        let mut meta = f.session.load_meta().unwrap();
-        meta.state = SessionState::Recording;
-        f.session.save_meta(&meta).unwrap();
-        assert!(pipeline(&f, &mut asr, None).process(&f.session).is_err());
+        f.session
+            .update_meta(|m| m.state = SessionState::Recording)
+            .unwrap();
+        assert!(
+            pipeline(&f, &mut asr, None)
+                .retranscribe(&f.session)
+                .is_err()
+        );
+        assert!(pipeline(&f, &mut asr, None).process(&f.session).is_ok());
+    }
+
+    #[test]
+    fn process_handles_closed_conversations_while_recording() {
+        let f = fixture(2.0, 2.0, 2_000);
+        f.session
+            .update_meta(|m| {
+                m.state = SessionState::Recording;
+                m.ended_at = None;
+                m.open_conversation_ms = Some(1_500);
+            })
+            .unwrap();
+        let mut asr = FakeProvider::new();
+        let sum = summarizer(false);
+        let report = pipeline(&f, &mut asr, Some(&sum))
+            .process(&f.session)
+            .unwrap();
+        assert_eq!(report.transcribed, vec![1]);
+        assert!(!report.compressed);
+        let meta = f.session.load_meta().unwrap();
+        assert_eq!(meta.state, SessionState::Recording);
+        assert_eq!(meta.open_conversation_ms, Some(1_500));
+        assert!(f.session.wav_path(Track::Me).is_file());
+    }
+
+    /// Appends conversation 2 while summarizing, the way the live session does.
+    struct AppendingSummarizer<'a> {
+        session: &'a Session,
+    }
+    impl Summarizer for AppendingSummarizer<'_> {
+        fn name(&self) -> String {
+            "appending".into()
+        }
+        fn summarize(&self, _: &str) -> Result<String> {
+            self.session
+                .update_meta(|m| m.conversations.push(Conversation::new(2, 1_000, 2_000)))?;
+            Ok("It went fine.".into())
+        }
+    }
+
+    #[test]
+    fn process_keeps_conversations_added_while_it_runs() {
+        let f = fixture(2.0, 2.0, 2_000);
+        let sum = AppendingSummarizer {
+            session: &f.session,
+        };
+        let mut asr = FakeProvider::new();
+        let report = pipeline(&f, &mut asr, Some(&sum))
+            .process(&f.session)
+            .unwrap();
+        // Conversation 2 still needs work, so the WAVs stay.
+        assert!(!report.compressed);
+        assert!(f.session.wav_path(Track::Me).is_file());
+        let meta = f.session.load_meta().unwrap();
+        assert_eq!(meta.conversations.len(), 2);
+        assert_eq!(meta.conversation(1).unwrap().stage, Stage::Summarized);
+        assert_eq!(meta.conversation(2).unwrap().stage, Stage::Pending);
     }
 
     #[test]

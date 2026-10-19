@@ -6,7 +6,7 @@ use crate::index::{HitKind, Index};
 use crate::models;
 use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
 use crate::render;
-use crate::store::{Session, Store, Track};
+use crate::store::{Session, SessionState, Store, Track};
 use crate::summarize;
 use crate::time;
 use anyhow::{Context, Result, bail};
@@ -166,6 +166,11 @@ pub fn run() -> Result<()> {
         }
         Command::Process { id } => {
             let session = store.resolve(&id)?;
+            // The daemon's worker processes a recording session's closed conversations; a
+            // second process doing the same at the same time would race it.
+            if session.load_meta()?.state == SessionState::Recording {
+                bail!("session {} is still recording", session.id);
+            }
             let mut provider = WhisperProvider::new(&config, &store)?;
             run_pipeline(
                 &store,

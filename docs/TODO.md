@@ -11,10 +11,10 @@ These start to matter once kute runs as a long-lived process.
   (`src/summarize/command.rs`) kills only the direct child, so with `sh -c ...` or a tool that
   forks, the grandchildren and the three pipe-reader threads outlive the timeout. Spawn the
   command in its own process group (`CommandExt::process_group(0)`) and kill the group.
-- [ ] **A model-load failure counts as an attempt on every conversation.** When
-  `AsrProvider::get` fails, `Pipeline::process` calls `Conversation::fail` for each pending
-  conversation, so `attempts` grows for all of them. Count it once per session (or not at all)
-  before the daemon's retry backoff starts reading `attempts`.
+- [x] **A model-load failure counts as an attempt on every conversation.** By design:
+  `attempts` counts processing runs that tried the conversation, and the worker's backoff
+  (plan 3) reads it that way, so a failed model load is one failed run for each waiting
+  conversation.
 - [x] **Temp files survive a Ctrl-C.** `Pipeline::process` now removes `.decoded-*.wav` and
   `.*.opus.tmp` before it starts.
 - [x] **Search index has no schema version.** It has `PRAGMA user_version` now; `pipeline::open_index`
