@@ -265,6 +265,11 @@ impl LiveSession {
         self.t0.is_some()
     }
 
+    /// Whether a conversation has closed, so the worker may have transcribed and indexed it.
+    pub fn has_closed_conversation(&self) -> bool {
+        self.next_n > 1
+    }
+
     /// Set when a track failed or its capture ended on its own; the daemon then finishes
     /// the session.
     pub fn failed(&self) -> Option<&str> {

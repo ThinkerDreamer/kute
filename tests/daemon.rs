@@ -238,6 +238,8 @@ fn a_mic_check_leaves_nothing_behind() {
     assert_eq!(h.phase(), Phase::Idle);
     assert!(h.store.list().unwrap().is_empty());
     assert!(h.sent().is_empty());
+    // Nothing of it can be indexed, so the daemon doesn't open the index.
+    assert!(!h.store.index_path().exists());
 }
 
 #[test]
@@ -301,6 +303,7 @@ fn control_requests_that_do_not_apply_are_errors() {
     assert_eq!(h.ok(Request::Discard), format!("discarded {id}"));
     assert!(h.store.list().unwrap().is_empty());
     assert!(h.sent().is_empty());
+    assert!(!h.store.index_path().exists());
 }
 
 #[test]
@@ -730,4 +733,16 @@ fn discard_removes_the_session_from_the_index_and_drops_its_jobs() {
     h.done(Job::Reindex, None, None);
     h.tick_until(h.now + 120_000);
     assert!(h.sent().is_empty());
+}
+
+#[test]
+fn discard_unindexes_a_session_whose_jobs_have_all_finished() {
+    let mut h = Harness::with(gap_10s(), |source| Box::new(source));
+    let id = record_until_a_conversation_closes(&mut h);
+    index_a_line(&h.store, &id, "budget");
+    h.done(Job::Process { id: id.clone() }, Some(&id), None);
+    assert_eq!(h.daemon.status().running_job, None);
+    // No job is left for it, but its closed conversation is in the index.
+    assert_eq!(h.ok(Request::Discard), format!("discarded {id}"));
+    assert!(search(&h.store, "budget").is_empty());
 }

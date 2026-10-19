@@ -341,9 +341,10 @@ impl Daemon {
                         continue;
                     };
                     let id = live.id().to_owned();
+                    let closed = live.has_closed_conversation();
                     live.discard().with_context(|| format!("discarding {id}"))?;
                     eprintln!("kute: discarded {id}");
-                    self.forget(&id);
+                    self.forget(&id, closed);
                 }
             }
         }
@@ -351,14 +352,23 @@ impl Daemon {
     }
 
     /// Drops what is left of a discarded session: the work queued for it and its rows in
-    /// the search index (its closed conversations may already be transcribed).
-    fn forget(&mut self, id: &str) {
-        self.queue.retain(|job| job.session() != Some(id));
-        self.retries.retain(|(_, job)| job.session() != Some(id));
+    /// the search index, when it may have some: a conversation `closed`, or a job for it
+    /// was queued, running or retrying. A mic check never gets that far, and skips opening
+    /// the index here, which can wait on the worker's writes.
+    fn forget(&mut self, id: &str, closed: bool) {
+        let ours = |job: &Job| job.session() == Some(id);
+        let indexed = closed
+            || self.queue.iter().any(ours)
+            || self.running.as_ref().is_some_and(ours)
+            || self.retries.iter().any(|(_, job)| ours(job));
+        self.queue.retain(|job| !ours(job));
+        self.retries.retain(|(_, job)| !ours(job));
         if self.running.is_some() {
             self.discarded.push(id.to_owned());
         }
-        unindex(&self.store, id);
+        if indexed {
+            unindex(&self.store, id);
+        }
     }
 
     fn start(&mut self, trigger: Option<App>) -> Result<()> {
