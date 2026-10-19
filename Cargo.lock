@@ -894,6 +894,7 @@ dependencies = [
  "dirs",
  "hound",
  "jiff",
+ "libc",
  "mockito",
  "rusqlite",
  "serde",

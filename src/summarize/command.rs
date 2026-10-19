@@ -3,6 +3,7 @@
 use super::Summarizer;
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -31,6 +32,8 @@ impl Summarizer for CommandSummarizer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // Its own process group, so a timeout can take down grandchildren too.
+            .process_group(0)
             .spawn()
             .with_context(|| format!("starting {program:?}"))?;
 
@@ -55,9 +58,16 @@ impl Summarizer for CommandSummarizer {
         });
 
         let Some(status) = child.wait_timeout(self.timeout)? else {
-            let _ = child.kill();
+            // SAFETY: plain syscall. The child leads the group we created with
+            // `process_group(0)`, so its pid is the group id and `-pid` targets that group.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             let _ = child.wait();
-            // Don't join the readers: a grandchild may still hold the pipes open.
+            // The group is dead, so the pipes are closed and the helper threads finish.
+            let _ = writer.join();
+            let _ = out_reader.join();
+            let _ = err_reader.join();
             bail!(
                 "{program} did not finish within {} s",
                 self.timeout.as_secs()
@@ -135,6 +145,27 @@ mod tests {
         let err = sh("sleep 30", 300).summarize("x").unwrap_err();
         assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn timeout_kills_grandchildren() {
+        // sh starts a background sleep that writes its PID, then waits. After the timeout the
+        // grandchild must be gone too.
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+        let s = sh(&script, 500);
+        assert!(s.summarize("prompt").is_err());
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "grandchild {pid} survived"
+        );
     }
 
     #[test]

@@ -7,10 +7,9 @@ None of them loses data. Tick them off as they land.
 
 These start to matter once kute runs as a long-lived process.
 
-- [ ] **Summarizer timeout leaves grandchildren running.** `CommandSummarizer::summarize`
-  (`src/summarize/command.rs`) kills only the direct child, so with `sh -c ...` or a tool that
-  forks, the grandchildren and the three pipe-reader threads outlive the timeout. Spawn the
-  command in its own process group (`CommandExt::process_group(0)`) and kill the group.
+- [x] **Summarizer timeout leaves grandchildren running.** `CommandSummarizer::summarize`
+  (`src/summarize/command.rs`) now spawns the command in its own process group and, on
+  timeout, kills the whole group and joins the reader threads.
 - [x] **A model-load failure counts as an attempt on every conversation.** By design:
   `attempts` counts processing runs that tried the conversation, and the worker's backoff
   (plan 3) reads it that way, so a failed model load is one failed run for each waiting
