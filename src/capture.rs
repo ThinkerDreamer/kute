@@ -17,7 +17,7 @@ impl Capture {
     pub fn new(reader: Box<dyn Read + Send>, stop: impl FnOnce() + Send + 'static) -> Capture {
         Capture {
             reader,
-            stop: StopHandle(Arc::new(Mutex::new(Some(Box::new(stop))))),
+            stop: StopHandle(Arc::new(StopOnce(Mutex::new(Some(Box::new(stop)))))),
         }
     }
 
@@ -33,15 +33,36 @@ impl Capture {
 }
 
 /// Stops a capture. Only the first call from any handle does anything; the reader then
-/// sees EOF.
+/// sees EOF. Dropping the last handle (and the `Capture`) without a call stops it too, so
+/// a forgotten `pw-record` doesn't keep running.
 #[derive(Clone)]
-pub struct StopHandle(Arc<Mutex<Option<StopFn>>>);
-
-type StopFn = Box<dyn FnOnce() + Send>;
+pub struct StopHandle(Arc<StopOnce>);
 
 impl StopHandle {
     pub fn stop(&self) {
-        let stop = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let stop = self
+            .0
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(stop) = stop {
+            stop();
+        }
+    }
+}
+
+type StopFn = Box<dyn FnOnce() + Send>;
+
+struct StopOnce(Mutex<Option<StopFn>>);
+
+impl Drop for StopOnce {
+    fn drop(&mut self) {
+        let stop = self
+            .0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some(stop) = stop {
             stop();
         }
@@ -147,5 +168,26 @@ mod tests {
         capture.stop();
         handle.stop();
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_the_last_handle_stops() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = count.clone();
+        let capture = Capture::new(Box::new(std::io::empty()), move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let handle = capture.stop_handle();
+        drop(capture);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(handle);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let c = count.clone();
+        let capture = Capture::new(Box::new(std::io::empty()), move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        capture.stop();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

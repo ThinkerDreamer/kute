@@ -21,7 +21,7 @@ pub const FLUSH_EVERY: u32 = 80_000;
 pub const VAD_BLOCK_MS: u64 = 10_000;
 /// 100 ms of S16LE.
 const READ_BYTES: usize = 3_200;
-/// Gap fill kicks in when the track falls this far behind the wall clock.
+/// Gap fill kicks in when a read blocks this much longer than the audio it returns.
 const GAP_FILL_SAMPLES: u64 = 8_000;
 const SILENCE: [i16; 1_600] = [0; 1_600];
 
@@ -208,11 +208,18 @@ pub fn spawn_track(
     })
 }
 
-/// Where the track should be after `elapsed_ms` since its first sample, if it has fallen
-/// more than 500 ms behind `written` samples.
-fn gap_fill_target(elapsed_ms: u64, written: u64) -> Option<u64> {
-    let expected = elapsed_ms * SAMPLE_RATE as u64 / 1_000;
-    (expected > written + GAP_FILL_SAMPLES).then_some(expected)
+/// How much silence to insert before a chunk of `read` samples from a read that blocked
+/// for `blocked_ms`: a read that waited more than 500 ms longer than the audio it returned
+/// means the device stalled. A fast read draining a backlog (the reader fell behind)
+/// never pads. Capped so the track never runs ahead of `elapsed_ms` since its first
+/// sample, given `written` samples so far.
+fn gap_fill_pad(blocked_ms: u64, read: u64, elapsed_ms: u64, written: u64) -> u64 {
+    let rate = SAMPLE_RATE as u64 / 1_000;
+    let stalled = blocked_ms * rate;
+    if stalled <= read + GAP_FILL_SAMPLES {
+        return 0;
+    }
+    (stalled - read).min((elapsed_ms * rate).saturating_sub(written))
 }
 
 fn record(
@@ -230,12 +237,20 @@ fn record(
     let mut first: Option<Instant> = None;
     let mut samples = Vec::with_capacity(READ_BYTES / 2);
     loop {
-        let n = match reader.read(&mut buf[carry..]) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e).context("reading the capture"),
+        let read_started = Instant::now();
+        let n = loop {
+            match reader.read(&mut buf[carry..]) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e).context("reading the capture"),
+            }
         };
+        if n == 0 {
+            break;
+        }
+        let blocked_ms = read_started.elapsed().as_millis() as u64;
+        // The first read waits for the capture to start, which is not a stall.
+        let first_read = first.is_none();
         let first = *first.get_or_insert_with(|| {
             let _ = tx.send(RecorderEvent::FirstSample {
                 track,
@@ -257,12 +272,13 @@ fn record(
         if carry == 1 {
             buf[0] = buf[whole];
         }
-        if options.gap_fill {
+        if options.gap_fill && !first_read {
             let elapsed_ms = first.elapsed().as_millis() as u64;
-            if let Some(target) = gap_fill_target(elapsed_ms, writer.samples()) {
-                let before = writer.samples();
-                writer.pad_to(target)?;
-                live.feed_silence(target - before, tx);
+            let written = writer.samples();
+            let pad = gap_fill_pad(blocked_ms, samples.len() as u64, elapsed_ms, written);
+            if pad > 0 {
+                writer.pad_to(written + pad)?;
+                live.feed_silence(pad, tx);
             }
         }
         writer.write(&samples)?;
@@ -288,7 +304,8 @@ impl LiveVad {
             return;
         }
         let block_len = ms_to_samples(VAD_BLOCK_MS);
-        while !samples.is_empty() {
+        // `run` drops the detector after an error, which would leave a full block behind.
+        while !samples.is_empty() && self.detector.is_some() {
             let take = (block_len - self.block.len()).min(samples.len());
             self.block
                 .extend(samples[..take].iter().map(|&s| s as f32 / 32768.0));
@@ -431,9 +448,39 @@ mod tests {
 
     #[test]
     fn gap_fill_keeps_track_time_aligned() {
-        assert_eq!(gap_fill_target(1_000, 16_000), None);
-        assert_eq!(gap_fill_target(2_000, 16_000), Some(32_000));
-        assert_eq!(gap_fill_target(1_400, 16_000), None);
+        // A read that blocked through a 2 s stall and returned 100 ms: pad the rest.
+        assert_eq!(gap_fill_pad(2_000, 1_600, 10_000, 100_000), 30_400);
+        // A read that blocked 2 s but returned the whole backlog: nothing was lost.
+        assert_eq!(gap_fill_pad(2_000, 32_000, 10_000, 100_000), 0);
+        // Under 500 ms.
+        assert_eq!(gap_fill_pad(300, 0, 10_000, 100_000), 0);
+        // Never past the wall clock.
+        assert_eq!(gap_fill_pad(2_000, 1_600, 10_000, 150_000), 10_000);
+        assert_eq!(gap_fill_pad(2_000, 1_600, 10_000, 170_000), 0);
+    }
+
+    struct FailVad;
+
+    impl SpeechDetector for FailVad {
+        fn speech_regions(&mut self, _: &[f32]) -> Result<Vec<crate::transcribe::Span>> {
+            bail!("no model")
+        }
+    }
+
+    #[test]
+    fn live_vad_stops_after_a_detector_error() {
+        let (tx, rx) = mpsc::channel();
+        let mut live = LiveVad {
+            track: Track::Me,
+            detector: Some(Box::new(FailVad)),
+            block: Vec::new(),
+            block_start: 0,
+        };
+        live.feed(&vec![0; 3 * ms_to_samples(VAD_BLOCK_MS)], &tx);
+        live.feed_silence(1_000_000, &tx);
+        live.run(&tx);
+        drop(tx);
+        assert_eq!(rx.iter().count(), 0);
     }
 
     fn pcm(seconds: u32, value: i16) -> Vec<u8> {
