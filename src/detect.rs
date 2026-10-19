@@ -69,6 +69,11 @@ pub struct Detector {
     started_ms: u64,
     /// When the session stopped being alive. Grace counts from here too.
     dead_since: Option<u64>,
+    /// Set by `stop` and `discard`: no automatic Start until the mic has been gone for
+    /// `MIC_GAP_MS`, so a call the user just stopped doesn't start again at once.
+    blocked: bool,
+    /// When the blocked detector last saw no mic stream.
+    quiet_since: Option<u64>,
 }
 
 fn ms(d: SignedDuration) -> u64 {
@@ -80,7 +85,7 @@ fn lowercase(rules: &[String]) -> Vec<String> {
 }
 
 /// An app matches a rule when its name or its binary does, case-insensitively.
-fn matches(app: &App, rules: &[String]) -> bool {
+fn app_matches(app: &App, rules: &[String]) -> bool {
     [&app.name, &app.binary]
         .into_iter()
         .flatten()
@@ -103,6 +108,8 @@ impl Detector {
             last: Vec::new(),
             started_ms: 0,
             dead_since: None,
+            blocked: false,
+            quiet_since: None,
         }
     }
 
@@ -114,6 +121,9 @@ impl Detector {
         self.last = streams.to_vec();
         let mut actions = Vec::new();
         if self.phase == Phase::Idle {
+            if self.blocked(now_ms) {
+                return actions;
+            }
             // Lowest serial first, since the graph sorts its streams but callers may not.
             let Some(first) = self
                 .live_mics()
@@ -135,6 +145,7 @@ impl Detector {
 
     /// Time passing without a new snapshot.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
+        self.blocked(now_ms);
         self.advance(now_ms)
     }
 
@@ -159,12 +170,12 @@ impl Detector {
 
     /// `kute stop`: ends any session at once, a Tentative one included.
     pub fn stop(&mut self) -> Result<Vec<Action>, DetectError> {
-        self.end(Action::Finish)
+        self.end(Action::Finish).inspect(|_| self.block())
     }
 
     /// `kute discard`: ends the session and deletes it.
     pub fn discard(&mut self) -> Result<Vec<Action>, DetectError> {
-        self.end(Action::Discard)
+        self.end(Action::Discard).inspect(|_| self.block())
     }
 
     /// Stop listening: ends an automatic session; a manual one continues.
@@ -215,17 +226,40 @@ impl Detector {
         Ok(vec![action])
     }
 
+    fn block(&mut self) {
+        self.blocked = true;
+        self.quiet_since = None;
+    }
+
+    /// Whether automatic Start is still blocked, lifting the block once the mic has been
+    /// gone for `MIC_GAP_MS`.
+    fn blocked(&mut self, now_ms: u64) -> bool {
+        if !self.blocked {
+            return false;
+        }
+        if self.live_mics().next().is_some() {
+            self.quiet_since = None;
+            return true;
+        }
+        let since = *self.quiet_since.get_or_insert(now_ms);
+        if since.saturating_add(MIC_GAP_MS) <= now_ms {
+            self.blocked = false;
+            self.quiet_since = None;
+        }
+        self.blocked
+    }
+
     fn ignored(&self, s: &Stream) -> bool {
         s.monitor
             || s.pid == Some(self.own_pid)
             || s.node_name
                 .as_deref()
                 .is_some_and(|n| n.starts_with("kute-"))
-            || matches(&s.app, &self.ignore_apps)
+            || app_matches(&s.app, &self.ignore_apps)
             || self
                 .allow_apps
                 .as_deref()
-                .is_some_and(|allow| !matches(&s.app, allow))
+                .is_some_and(|allow| !app_matches(&s.app, allow))
     }
 
     fn live_mics(&self) -> impl Iterator<Item = &Stream> {
@@ -655,5 +689,75 @@ mod tests {
             serde_json::to_string(&Phase::Tentative).unwrap(),
             "\"tentative\""
         );
+    }
+
+    /// The mic stays open for a minute after the user's `stop`/`discard`, then closes at
+    /// 100 s; a mic appearing after the confirmed gap starts a new session.
+    fn assert_blocked_until_gap(d: &mut Detector) {
+        for t in (1..=60).map(|s| 40_000 + s * 1_000) {
+            assert!(d.streams(&[mic(88, jitsi())], t).is_empty());
+            assert!(d.tick(t).is_empty());
+        }
+        assert_eq!(d.phase(), Phase::Idle);
+        assert!(d.streams(&[], 100_000).is_empty());
+        assert!(d.tick(101_999).is_empty());
+        assert!(d.streams(&[mic(88, jitsi())], 101_999).is_empty());
+        d.streams(&[], 102_000);
+        assert!(d.tick(104_000).is_empty());
+        assert!(matches!(
+            d.streams(&[mic(95, jitsi())], 104_500)[..],
+            [Action::Start { .. }]
+        ));
+    }
+
+    #[test]
+    fn stop_blocks_restart_until_the_mic_gap() {
+        let mut d = recording();
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        // The daemon stopping its capture streams produces a snapshot with the call's mic.
+        assert!(
+            d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 30_000)
+                .is_empty()
+        );
+        assert_blocked_until_gap(&mut d);
+    }
+
+    #[test]
+    fn discard_from_tentative_blocks_restart_until_the_mic_gap() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(88, jitsi())], 0);
+        assert_eq!(d.discard(), Ok(vec![Action::Discard]));
+        assert!(d.streams(&[mic(88, jitsi())], 30_000).is_empty());
+        assert_blocked_until_gap(&mut d);
+    }
+
+    #[test]
+    fn manual_stop_during_a_call_blocks_restart() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        d.streams(&[mic(88, jitsi())], 10_000);
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        assert!(d.streams(&[mic(88, jitsi())], 30_000).is_empty());
+        assert_blocked_until_gap(&mut d);
+    }
+
+    #[test]
+    fn record_still_works_while_restart_is_blocked() {
+        let mut d = recording();
+        d.stop().unwrap();
+        assert_eq!(
+            d.record(30_000),
+            Ok(vec![Action::Start { trigger: None }, Action::Commit])
+        );
+    }
+
+    #[test]
+    fn pause_in_grace_finishes() {
+        let mut d = recording();
+        d.streams(&[], 100_000);
+        d.tick(102_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.pause(), vec![Action::Finish]);
+        assert_eq!(d.phase(), Phase::Idle);
     }
 }
