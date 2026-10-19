@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 /// How often the detector and the live session are looked at between graph changes.
 const TICK: Duration = Duration::from_millis(500);
+/// A capture that dies this soon after its session started points at pw-record itself.
+const BROKEN_CAPTURE_MS: u64 = 5_000;
 
 pub enum Event {
     Monitor(MonitorEvent),
@@ -86,7 +88,9 @@ impl Daemon {
                 let actions = self.detector.streams(&self.snapshot.streams, now_ms);
                 self.apply(actions)
             }
-            Event::Monitor(MonitorEvent::Disconnected(reason)) => self.disconnected(&reason),
+            Event::Monitor(MonitorEvent::Disconnected(reason)) => {
+                self.disconnected(&reason, now_ms)
+            }
             Event::Tick => self.tick(now_ms),
             Event::Ipc(Incoming { request, reply }) => {
                 let response = self.request(request, now_ms);
@@ -109,16 +113,16 @@ impl Daemon {
         }
     }
 
-    /// Spec: "close the current session as if it ended". A Tentative one was never shown,
-    /// so it goes.
-    fn disconnected(&mut self, reason: &str) -> Result<()> {
+    /// Spec: "close the current session as if it ended". The graph is unknown until the
+    /// monitor reconnects, so the detector sees no streams: an automatic session ends the
+    /// way it would if the call had ended, unless the call is back in time; a manual one
+    /// carries on. Not the user's stop, so nothing blocks the call from being picked up
+    /// again (R24).
+    fn disconnected(&mut self, reason: &str, now_ms: u64) -> Result<()> {
         eprintln!("kute: lost the PipeWire graph: {reason}");
-        let ended = match self.detector.phase() {
-            Phase::Idle => return Ok(()),
-            Phase::Tentative => self.detector.discard(),
-            Phase::Recording | Phase::Grace => self.detector.stop(),
-        };
-        self.apply(ended.unwrap_or_default())
+        self.snapshot = Snapshot::default();
+        let actions = self.detector.streams(&[], now_ms);
+        self.apply(actions)
     }
 
     fn tick(&mut self, now_ms: u64) -> Result<()> {
@@ -126,6 +130,7 @@ impl Daemon {
             let id = live.id().to_owned();
             let pumped = live.pump();
             let mut failed = live.failed().map(str::to_owned);
+            let has_audio = live.has_audio();
             match pumped {
                 Ok(closed) if !closed.is_empty() => {
                     self.enqueue(Job::Process { id: id.clone() })?
@@ -136,8 +141,7 @@ impl Daemon {
             }
             if let Some(reason) = failed {
                 eprintln!("kute: {id}: ending the session: {reason}");
-                let ended = self.detector.stop().unwrap_or_default();
-                self.apply(ended)?;
+                self.end_failed(has_audio, now_ms)?;
             }
         }
         let actions = self.detector.tick(now_ms);
@@ -151,6 +155,34 @@ impl Daemon {
             self.enqueue(job)?;
         }
         Ok(())
+    }
+
+    /// Ends a session whose recording failed. That is not the user's stop, so a call still
+    /// in progress may start a new session (R24), unless the capture died within
+    /// `BROKEN_CAPTURE_MS` of starting: pw-record itself is then likely broken, and would
+    /// fail the same way every tick. A Tentative session with no audio is discarded.
+    fn end_failed(&mut self, has_audio: bool, now_ms: u64) -> Result<()> {
+        let discard = self.detector.phase() == Phase::Tentative && !has_audio;
+        let early = self
+            .detector
+            .started_ms()
+            .is_some_and(|started| now_ms.saturating_sub(started) < BROKEN_CAPTURE_MS);
+        let ended = match (discard, early) {
+            (false, false) => self.detector.stop_unblocked(),
+            (false, true) => self.detector.stop(),
+            (true, false) => self.detector.discard_unblocked(),
+            (true, true) => self.detector.discard(),
+        };
+        // The detector already counts the session as over: end it here too, so the two
+        // agree and this doesn't come back every tick.
+        let actions = ended.unwrap_or_else(|_| {
+            vec![if discard {
+                Action::Discard
+            } else {
+                Action::Finish
+            }]
+        });
+        self.apply(actions)
     }
 
     /// Answers a control request. Errors become the reply; the ones that are not just a
@@ -478,5 +510,44 @@ struct RemoveOnDrop(PathBuf);
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{SessionState, Track};
+    use crate::testing::{FakeSource, run_vad};
+
+    #[test]
+    fn a_failed_capture_ends_the_session_even_when_the_detector_is_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let source = FakeSource::default();
+        let (tx, worker) = mpsc::channel();
+        let mut d = Daemon::new(
+            store.clone(),
+            Config::default(),
+            Box::new(source.clone()),
+            run_vad(),
+            tx,
+        );
+        d.control(Request::Record { title: None }, 0).unwrap();
+        let id = d.live_id();
+        // However the two came apart, the detector has no session.
+        d.detector = Detector::new(&d.config.detect, 1);
+        source.close(Track::Me);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while d.live.is_some() {
+            assert!(Instant::now() < deadline, "the session never ended");
+            thread::sleep(Duration::from_millis(10));
+            d.handle(Event::Tick, 10_000).unwrap();
+        }
+        let meta = store.session(&id).unwrap().load_meta().unwrap();
+        assert_eq!(meta.state, SessionState::Processing);
+        assert!(matches!(
+            worker.try_recv(),
+            Ok(WorkerMsg::Run(Job::Process { .. }))
+        ));
     }
 }

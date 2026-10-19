@@ -178,6 +178,17 @@ impl Detector {
         self.end(Action::Discard).inspect(|_| self.block())
     }
 
+    /// The daemon ending the session on its own (a capture failed): like `stop`, but a
+    /// call still in progress may start a new session right away.
+    pub fn stop_unblocked(&mut self) -> Result<Vec<Action>, DetectError> {
+        self.end(Action::Finish)
+    }
+
+    /// `discard` without blocking a new session, like `stop_unblocked`.
+    pub fn discard_unblocked(&mut self) -> Result<Vec<Action>, DetectError> {
+        self.end(Action::Discard)
+    }
+
     /// Stop listening: ends an automatic session; a manual one continues.
     pub fn pause(&mut self) -> Vec<Action> {
         self.paused = true;
@@ -211,6 +222,11 @@ impl Detector {
 
     pub fn trigger(&self) -> Option<&App> {
         self.trigger.as_ref()
+    }
+
+    /// When the current session started; `None` when Idle.
+    pub fn started_ms(&self) -> Option<u64> {
+        (self.phase != Phase::Idle).then_some(self.started_ms)
     }
 
     fn end(&mut self, action: Action) -> Result<Vec<Action>, DetectError> {
@@ -749,6 +765,28 @@ mod tests {
             d.record(30_000),
             Ok(vec![Action::Start { trigger: None }, Action::Commit])
         );
+    }
+
+    #[test]
+    fn a_session_the_daemon_ends_does_not_block_restart() {
+        let mut d = recording();
+        assert_eq!(d.stop_unblocked(), Ok(vec![Action::Finish]));
+        assert_eq!(d.phase(), Phase::Idle);
+        // The call's mic is still there: it starts a new session at once.
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 30_000)[..],
+            [Action::Start { .. }]
+        ));
+        assert_eq!(d.discard_unblocked(), Ok(vec![Action::Discard]));
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi())], 31_000)[..],
+            [Action::Start { .. }]
+        ));
+        assert_eq!(d.started_ms(), Some(31_000));
+        d.stop_unblocked().unwrap();
+        assert_eq!(d.started_ms(), None);
+        assert_eq!(d.stop_unblocked(), Err(DetectError::NotRecording));
+        assert_eq!(d.discard_unblocked(), Err(DetectError::NotRecording));
     }
 
     #[test]

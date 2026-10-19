@@ -68,6 +68,18 @@ impl FakeSource {
         let slot = pipes.get(&track).expect("capture not opened");
         FakeWriter(slot.clone())
     }
+
+    /// Ends the last capture opened for `track` as if it stopped on its own: its track
+    /// thread reads what is left and sees EOF. Panics if there is none.
+    pub fn close(&self, track: Track) {
+        let pipes = self.pipes.lock().unwrap();
+        pipes
+            .get(&track)
+            .expect("capture not opened")
+            .lock()
+            .unwrap()
+            .take();
+    }
 }
 
 impl CaptureSource for FakeSource {

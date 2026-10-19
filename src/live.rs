@@ -251,6 +251,11 @@ impl LiveSession {
         }
     }
 
+    /// Whether either track has delivered a sample yet.
+    pub fn has_audio(&self) -> bool {
+        self.t0.is_some()
+    }
+
     /// Set when a track failed or its capture ended on its own; the daemon then finishes
     /// the session.
     pub fn failed(&self) -> Option<&str> {

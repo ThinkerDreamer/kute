@@ -113,6 +113,22 @@ impl Harness {
     fn phase(&self) -> Phase {
         self.daemon.status().phase
     }
+
+    fn disconnect(&mut self) {
+        let event = Event::Monitor(MonitorEvent::Disconnected("gone".into()));
+        self.daemon.handle(event, self.now).unwrap();
+    }
+
+    /// Ticks without moving the fake clock until the session ends, waiting for the track
+    /// threads in real time.
+    fn tick_until_idle(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.phase() != Phase::Idle {
+            assert!(Instant::now() < deadline, "the session never ended");
+            std::thread::sleep(Duration::from_millis(10));
+            self.daemon.handle(Event::Tick, self.now).unwrap();
+        }
+    }
 }
 
 fn source(name: &str, description: &str) -> Source {
@@ -374,30 +390,70 @@ fn pause_ends_a_detected_session_and_resume_picks_the_call_up_again() {
     assert_eq!((status.phase, status.paused), (Phase::Tentative, false));
 }
 
+fn call() -> Vec<Stream> {
+    vec![
+        jitsi(100, StreamKind::Mic, true),
+        jitsi(101, StreamKind::Output, true),
+    ]
+}
+
 #[test]
-fn a_pipewire_disconnect_ends_the_session() {
+fn a_pipewire_hiccup_mid_call_keeps_the_session() {
     let mut h = Harness::new();
-    h.snapshot(vec![jitsi(100, StreamKind::Mic, true)]).unwrap();
-    h.daemon
-        .handle(
-            Event::Monitor(MonitorEvent::Disconnected("gone".into())),
-            500,
-        )
-        .unwrap();
+    h.snapshot(call()).unwrap();
+    h.tick_until(20_000);
+    assert_eq!(h.phase(), Phase::Recording);
+    let id = h.daemon.status().session.unwrap();
+
+    h.disconnect();
+    h.tick_until(21_000);
+    // The monitor reconnects and the call's mic is still there.
+    h.snapshot(call()).unwrap();
+    h.tick_until(60_000);
+    let status = h.daemon.status();
+    assert_eq!(status.phase, Phase::Recording);
+    assert_eq!(status.session, Some(id));
+    assert!(h.sent().is_empty());
+}
+
+#[test]
+fn a_pipewire_disconnect_ends_a_detected_session_as_if_the_call_ended() {
+    let mut h = Harness::new();
+    h.snapshot(call()).unwrap();
+    h.disconnect();
+    // A Tentative session goes once the gap is confirmed, and is deleted.
+    assert_eq!(h.phase(), Phase::Tentative);
+    h.tick_until(2_000);
     assert_eq!(h.phase(), Phase::Idle);
-    // A Tentative session is deleted.
     assert!(h.store.list().unwrap().is_empty());
 
-    h.ok(Request::Record { title: None });
+    // A recording one runs out its grace and is processed.
+    h.snapshot(call()).unwrap();
+    h.tick_until(30_000);
+    assert_eq!(h.phase(), Phase::Recording);
     let id = h.daemon.status().session.unwrap();
-    h.daemon
-        .handle(
-            Event::Monitor(MonitorEvent::Disconnected("gone".into())),
-            1_000,
-        )
-        .unwrap();
+    h.disconnect();
+    h.tick_until(32_000);
+    assert_eq!(h.phase(), Phase::Grace);
+    h.tick_until(45_000);
     assert_eq!(h.phase(), Phase::Idle);
     assert_eq!(h.sent(), vec![Job::Process { id }]);
+
+    // Not the user's stop: the call still going on when PipeWire is back is recorded.
+    h.snapshot(call()).unwrap();
+    assert_eq!(h.phase(), Phase::Tentative);
+}
+
+#[test]
+fn a_pipewire_disconnect_leaves_a_manual_session_alone() {
+    let mut h = Harness::new();
+    h.ok(Request::Record { title: None });
+    let id = h.daemon.status().session.unwrap();
+    h.disconnect();
+    h.tick_until(60_000);
+    let status = h.daemon.status();
+    assert_eq!(status.phase, Phase::Recording);
+    assert_eq!(status.session, Some(id));
 }
 
 #[test]
@@ -490,15 +546,55 @@ fn a_capture_that_ends_on_its_own_finishes_the_session() {
     let mut h = Harness::with(Config::default(), |_| Box::new(Short));
     h.ok(Request::Record { title: None });
     let id = h.daemon.status().session.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while h.phase() != Phase::Idle {
-        assert!(Instant::now() < deadline, "the session never finished");
-        std::thread::sleep(Duration::from_millis(10));
-        h.tick_until(h.now + 500);
-    }
+    h.tick_until_idle();
     let meta = h.store.session(&id).unwrap().load_meta().unwrap();
     assert_eq!(meta.state, SessionState::Processing);
     assert_eq!(h.sent(), vec![Job::Process { id }]);
+}
+
+#[test]
+fn a_capture_that_dies_mid_call_does_not_block_the_call() {
+    let mut h = Harness::new();
+    h.snapshot(call()).unwrap();
+    let id = h.daemon.status().session.unwrap();
+    for track in Track::BOTH {
+        h.source.writer(track).write_all(&pcm(1, 0..0)).unwrap();
+    }
+    h.tick_until(30_000);
+    assert_eq!(h.phase(), Phase::Recording);
+    h.source.close(Track::Me);
+    h.tick_until_idle();
+    assert_eq!(h.sent(), vec![Job::Process { id: id.clone() }]);
+
+    // pw-record leaving the graph makes a snapshot: the call is still on.
+    h.snapshot(call()).unwrap();
+    let status = h.daemon.status();
+    assert_eq!(status.phase, Phase::Tentative);
+    assert_ne!(status.session, Some(id));
+}
+
+/// Captures that end at once, without a sample.
+struct Empty;
+
+impl CaptureSource for Empty {
+    fn open(&self, _track: Track, _target: Option<&str>) -> Result<Capture> {
+        Ok(Capture::new(Box::new(std::io::empty()), || {}))
+    }
+}
+
+#[test]
+fn a_capture_that_dies_at_once_discards_and_blocks_the_call() {
+    let mut h = Harness::with(Config::default(), |_| Box::new(Empty));
+    h.snapshot(call()).unwrap();
+    assert_eq!(h.phase(), Phase::Tentative);
+    h.tick_until_idle();
+    // Nothing was recorded: no folder, nothing to process.
+    assert!(h.store.list().unwrap().is_empty());
+    assert!(h.sent().is_empty());
+    // pw-record is likely broken: don't start a session that fails again every tick.
+    h.now = 1_000;
+    h.snapshot(call()).unwrap();
+    assert_eq!(h.phase(), Phase::Idle);
 }
 
 /// A manual session with a 10 s conversation gap whose first conversation has closed,
