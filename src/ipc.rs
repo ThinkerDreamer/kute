@@ -42,6 +42,9 @@ pub struct Status {
     pub session: Option<String>,
     pub app: Option<String>,
     pub queued: usize,
+    /// Sessions waiting out the backoff before their transcription is tried again.
+    #[serde(default)]
+    pub retrying: usize,
     pub running_job: Option<String>,
 }
 
@@ -192,6 +195,7 @@ mod tests {
             session: Some("2026-10-19-1000-standup".into()),
             app: Some("zoom".into()),
             queued: 2,
+            retrying: 1,
             running_job: Some("process".into()),
         }
     }

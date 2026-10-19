@@ -338,6 +338,7 @@ fn print_status(status: &Status) {
     println!("session: {}", or_dash(&status.session));
     println!("app: {}", or_dash(&status.app));
     println!("queued: {}", status.queued);
+    println!("retrying: {}", status.retrying);
     println!("running: {}", or_dash(&status.running_job));
 }
 

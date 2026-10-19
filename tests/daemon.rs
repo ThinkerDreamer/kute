@@ -368,9 +368,11 @@ fn a_failed_transcription_is_retried_after_the_backoff() {
     h.sent();
     h.now = 1_000;
     h.done(import, Some("s1"), Some(Duration::from_secs(60)));
+    assert_eq!(h.daemon.status().retrying, 1);
     h.tick_until(60_500);
     assert!(h.sent().is_empty());
     h.tick_until(61_000);
+    assert_eq!(h.daemon.status().retrying, 0);
     // The import is never re-sent: its session is processed again.
     assert_eq!(h.sent(), vec![Job::Process { id: "s1".into() }]);
 }

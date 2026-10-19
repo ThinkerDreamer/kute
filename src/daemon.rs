@@ -109,6 +109,7 @@ impl Daemon {
             session: self.live.as_ref().map(|l| l.id().to_owned()),
             app: self.detector.trigger().and_then(app_label),
             queued: self.queue.len(),
+            retrying: self.retries.len(),
             running_job: self.running.as_ref().map(ToString::to_string),
         }
     }
