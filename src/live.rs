@@ -172,6 +172,22 @@ impl LiveSession {
                     self.session.update_meta(|m| m.started_at = at.clone())?;
                     self.t0 = Some(at);
                 }
+                // The threads race to send, so the earlier sample can arrive second: it
+                // becomes session time 0. Only ever a few ms, before any speech.
+                Some(t0) if at < *t0 => {
+                    let shift = time::ms_between(&at, t0);
+                    for t in Track::BOTH {
+                        self.offsets[idx(t)] = if t == track { 0 } else { shift };
+                    }
+                    let offsets = self.offsets;
+                    self.session.update_meta(|m| {
+                        m.started_at = at.clone();
+                        for t in Track::BOTH {
+                            m.tracks.get_mut(t).offset_ms = offsets[idx(t)];
+                        }
+                    })?;
+                    self.t0 = Some(at);
+                }
                 Some(t0) => {
                     let offset = time::ms_between(t0, &at);
                     self.offsets[idx(track)] = offset;
@@ -245,9 +261,7 @@ impl LiveSession {
     /// have before they exit.
     fn stop(&mut self) {
         self.stopping = true;
-        for stop in &self.stops {
-            stop.stop();
-        }
+        self.stop_captures();
         for (track, handle) in self.threads.drain(..) {
             if handle.join().is_err() {
                 eprintln!("kute: the {} track thread panicked", track.as_str());
@@ -289,13 +303,28 @@ impl LiveSession {
             m.ended_at = Some(time::add_ms(&m.started_at, end));
             m.state = SessionState::Processing;
         })?;
-        Ok(self.session)
+        Ok(self.session.clone())
     }
 
     /// Stops recording and deletes the session.
     pub fn discard(mut self) -> Result<()> {
         self.stop();
-        self.session.delete()
+        self.session.clone().delete()
+    }
+
+    fn stop_captures(&self) {
+        for stop in &self.stops {
+            stop.stop();
+        }
+    }
+}
+
+/// A session dropped without `finish` or `discard` (after an error) still stops its
+/// captures, so nothing keeps recording without an owner. The track threads then exit
+/// on their own; their events go nowhere.
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        self.stop_captures();
     }
 }
 
@@ -328,17 +357,31 @@ pub fn recover(store: &Store) -> Result<Vec<Session>> {
                 Err(e) => eprintln!("kute: {}: {e:#}", session.id),
             }
         }
-        session.update_meta(|m| {
+        let updated = session.update_meta(|m| {
             m.interrupted = true;
-            if let Some(start_ms) = m.open_conversation_ms.take()
-                && start_ms < end
-            {
-                let n = m.conversations.iter().map(|c| c.n).max().unwrap_or(0) + 1;
-                m.conversations.push(Conversation::new(n, start_ms, end));
+            match m.open_conversation_ms.take() {
+                Some(start_ms) if start_ms < end => {
+                    let n = m.conversations.iter().map(|c| c.n).max().unwrap_or(0) + 1;
+                    m.conversations.push(Conversation::new(n, start_ms, end));
+                }
+                Some(start_ms) => eprintln!(
+                    "kute: {}: dropping the open conversation at {start_ms} ms, after the \
+                     end of the audio ({end} ms)",
+                    session.id
+                ),
+                // Recorded without live speech detection: the whole session is one.
+                None if m.conversations.is_empty() && end > 0 => {
+                    m.conversations.push(Conversation::new(1, 0, end));
+                }
+                None => {}
             }
             m.ended_at = Some(time::add_ms(&m.started_at, end));
             m.state = SessionState::Processing;
-        })?;
+        });
+        if let Err(e) = updated {
+            eprintln!("kute: could not recover {}: {e:#}", session.id);
+            continue;
+        }
         eprintln!("kute: recovered interrupted session {}", session.id);
         recovered.push(session);
     }
@@ -488,6 +531,44 @@ mod tests {
         assert_eq!(meta.tracks.me.offset_ms, 0);
         assert_eq!(meta.tracks.others.offset_ms, 37);
         live.discard().unwrap();
+    }
+
+    #[test]
+    fn an_earlier_first_sample_arriving_later_becomes_session_time_0() {
+        let (_tmp, store) = store();
+        let source = FakeSource::default();
+        let mut live =
+            LiveSession::start(&store, &config(30), manual(), &source, run_vad()).unwrap();
+        let others_at: Zoned = "2026-10-19T10:00:00.100+02:00[+02:00]".parse().unwrap();
+        // Me's thread sent first, but its sample came 37 ms later.
+        live.on_event(RecorderEvent::FirstSample {
+            track: Track::Me,
+            at: crate::time::add_ms(&others_at, 37),
+        })
+        .unwrap();
+        live.on_event(RecorderEvent::FirstSample {
+            track: Track::Others,
+            at: others_at.clone(),
+        })
+        .unwrap();
+        assert_eq!(live.offsets, [37, 0]);
+        let meta = store.session(live.id()).unwrap().load_meta().unwrap();
+        assert_eq!(meta.started_at, others_at);
+        assert_eq!(meta.tracks.me.offset_ms, 37);
+        assert_eq!(meta.tracks.others.offset_ms, 0);
+        live.discard().unwrap();
+    }
+
+    #[test]
+    fn dropping_a_session_stops_its_captures() {
+        let (_tmp, store) = store();
+        let source = FakeSource::default();
+        let live = LiveSession::start(&store, &config(30), manual(), &source, run_vad()).unwrap();
+        drop(live);
+        for track in Track::BOTH {
+            let err = source.writer(track).write_all(&[0; 2]).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        }
     }
 
     #[test]
@@ -656,5 +737,60 @@ mod tests {
             assert_eq!(wav.duration(), samples);
         }
         assert_eq!(done.load_meta().unwrap(), done_meta);
+    }
+
+    fn crashed_session(store: &Store, at: &str, me_samples: usize) -> crate::store::Session {
+        let started: Zoned = at.parse().unwrap();
+        let session = store.create_session(&started).unwrap();
+        let meta = Meta::new(
+            session.id.clone(),
+            started,
+            Trigger {
+                kind: TriggerKind::Manual,
+                app_name: None,
+                binary: None,
+            },
+            "auto".into(),
+        );
+        session.save_meta(&meta).unwrap();
+        if me_samples > 0 {
+            let path = session.wav_path(Track::Me);
+            let mut w = TrackWriter::create(&path).unwrap();
+            w.write(&vec![7; me_samples]).unwrap();
+            w.finish().unwrap();
+            crash_wav(&path);
+        }
+        session
+    }
+
+    #[test]
+    fn recover_makes_a_session_without_live_vad_one_conversation() {
+        let (_tmp, store) = store();
+        let session = crashed_session(&store, "2026-10-19T10:00:00+02:00[+02:00]", 32_000);
+        recover(&store).unwrap();
+        let meta = session.load_meta().unwrap();
+        assert_eq!(meta.conversations, [Conversation::new(1, 0, 2_000)]);
+        assert_eq!(meta.conversations[0].stage, Stage::Pending);
+        assert_eq!(meta.state, SessionState::Processing);
+    }
+
+    #[test]
+    fn recover_skips_a_session_it_cannot_update() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, store) = store();
+        let stuck = crashed_session(&store, "2026-10-19T09:00:00+02:00[+02:00]", 0);
+        let fine = crashed_session(&store, "2026-10-19T10:00:00+02:00[+02:00]", 16_000);
+        // `update_meta` can't create its temp file in a read-only folder.
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&stuck.dir, mode(0o500)).unwrap();
+        let recovered = recover(&store);
+        std::fs::set_permissions(&stuck.dir, mode(0o700)).unwrap();
+        let recovered = recovered.unwrap();
+        assert_eq!(
+            recovered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            [fine.id.as_str()]
+        );
+        assert_eq!(stuck.load_meta().unwrap().state, SessionState::Recording);
+        assert_eq!(fine.load_meta().unwrap().state, SessionState::Processing);
     }
 }
