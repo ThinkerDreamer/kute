@@ -212,7 +212,9 @@ later per-speaker labels on the others side (`Others (A)`).
 - **Session alive:** any non-ignored mic stream exists, **or** one of the session's
   *bound output nodes* still exists. A bound output node is a `Stream/Output/Audio` node of
   the trigger app (same binary and `application.name`) that was present at some moment
-  while a mic stream was alive. The second clause keeps a session alive if an app closes its
+  while a mic stream was alive, and it counts only while its state is `running`: the Jitsi
+  Meet app's output stream stayed `running` through silence and went `idle` the moment the
+  user left the room (spike, section 12). The second clause keeps a session alive if an app closes its
   mic on mute. It is bound to specific nodes, not to the app, so a YouTube video started in the same
   Firefox after leaving the call opens a new node and does not keep the session alive.
   Nodes are tracked by `object.serial`, never by node ID: PipeWire reuses IDs within
@@ -239,7 +241,9 @@ later per-speaker labels on the others side (`Others (A)`).
   Stop / Discard.
 - **Grace:** recording continues. If the session becomes alive again, back to Recording,
   same session.
-- **Paused** (`kute pause`): the detector ignores all streams until `kute resume`. The tray
+- **Paused** (`kute pause`): the detector ignores all streams until `kute resume`. Pausing
+  during an automatic session ends it (Tentative is deleted, Recording or Grace is
+  finalized), since pausing means "stop listening"; a manual session continues. The tray
   shows the paused state. A manual `kute record` still works while paused.
 - **Manual:** `kute record [title]` starts a session in Recording state with
   `trigger.kind = "manual"`; it ends only with `kute stop` (no grace logic). If a session
@@ -261,16 +265,28 @@ The detector is a pure function of (state, event, now) and is tested without Pip
   follows default-sink changes.
 - Format requested from PipeWire: 16 kHz, mono, S16LE. WAV written with `hound`; the
   header is rewritten every 5 s so a crash leaves a valid file.
-- Each track records the wall-clock time of its first sample (for `offset_ms`).
+- Each track records the wall-clock time of its first sample. The first track to deliver a
+  sample sets `started_at` (session `t = 0`); the other track's `offset_ms` is how much later
+  its first sample arrived.
+- Capture uses PipeWire's own tools, not bindings: `pw-dump --monitor` streams graph changes
+  as JSON, and one `pw-record` process per track writes raw 16 kHz mono S16LE PCM to stdout.
+  kute's capture streams are named `kute-me` and `kute-others` (`node.name`), and the
+  detector ignores any stream whose `node.name` starts with `kute-`.
+- If a track delivers fewer samples than wall-clock time says it should (a device switch, an
+  xrun), the recorder pads the gap with silence once it exceeds 500 ms, so track time stays
+  aligned with the wall clock.
 
 ### Conversation splitting (live)
 
 A lightweight VAD runs on both tracks as frames arrive. A conversation opens at the first
 speech frame after a gap and closes after `detect.conversation_gap` (default 5 min) with no
 speech on either track, or when the session ends. Its range is padded by 2 s on each side
-(clamped to the session). Precision is not critical here. Candidates: whisper.cpp's Silero
-VAD on CPU if `whisper-rs` exposes it, otherwise the WebRTC VAD; decided in implementation
-task 1.
+(clamped to the session). Precision is not critical here. The VAD is Silero via
+`whisper-rs` (`WhisperVadContext`, CPU), run on each track in 10 s blocks as audio arrives.
+A conversation closes only once both tracks have been analysed past the gap. The open
+conversation's start is kept in `meta.toml` as `open_conversation_ms` so crash recovery can
+close it. If the VAD model is missing, live splitting is off and the whole session becomes
+one conversation when it ends.
 
 A session with no speech at all keeps its audio and metadata and has zero conversations.
 
