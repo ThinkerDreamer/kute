@@ -7,6 +7,7 @@ pub mod config;
 pub mod detect;
 pub mod import;
 pub mod index;
+pub mod ipc;
 pub mod jobs;
 pub mod live;
 pub mod merge;
