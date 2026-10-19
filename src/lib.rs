@@ -11,6 +11,7 @@ pub mod models;
 pub mod pipeline;
 pub mod pw;
 pub mod render;
+pub mod split;
 pub mod store;
 pub mod summarize;
 pub mod time;
