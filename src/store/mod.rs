@@ -36,6 +36,7 @@ impl Track {
     }
 }
 
+#[derive(Clone)]
 pub struct Store {
     root: PathBuf,
 }

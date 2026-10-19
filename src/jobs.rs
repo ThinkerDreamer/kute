@@ -43,6 +43,20 @@ pub enum Job {
     Reindex,
 }
 
+/// A short description for logs and `kute status`, e.g. "process 2026-10-08T090312".
+impl std::fmt::Display for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Job::Process { id } => write!(f, "process {id}"),
+            Job::Retranscribe { id, .. } => write!(f, "retranscribe {id}"),
+            Job::Summarize { id, .. } => write!(f, "summarize {id}"),
+            Job::Import { me, .. } => write!(f, "import {}", me.display()),
+            Job::Title { id, .. } => write!(f, "title {id}"),
+            Job::Reindex => f.write_str("reindex"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Outcome {
     /// What the CLI prints on stdout; may be empty.

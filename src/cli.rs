@@ -1,7 +1,9 @@
 //! The `kute` command line.
 
 use crate::config::{Config, SummaryBackend};
+use crate::daemon;
 use crate::index::HitKind;
+use crate::ipc::{self, Request, Response, Status};
 use crate::jobs::{self, Job};
 use crate::models;
 use crate::pipeline;
@@ -29,6 +31,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the daemon: detect, record and process calls (normally started by systemd)
+    Daemon,
+    /// Show what the daemon is doing
+    Status,
+    /// Start recording now; it goes on until `kute stop`
+    Record { title: Vec<String> },
+    /// Stop the current recording and process it
+    Stop,
+    /// Stop the current recording and delete it
+    Discard,
+    /// Stop detecting calls until `kute resume` (ends a detected recording)
+    Pause,
+    /// Detect calls again
+    Resume,
     /// Import two recordings (your mic, everyone else) and process them
     Import {
         me: PathBuf,
@@ -129,6 +145,15 @@ pub fn run() -> Result<()> {
     let store = Store::open(config.data_dir()?)?;
 
     match cli.command {
+        Command::Daemon => daemon::run(store, config)?,
+        Command::Status => control(Request::Status)?,
+        Command::Record { title } => control(Request::Record {
+            title: (!title.is_empty()).then(|| title.join(" ")),
+        })?,
+        Command::Stop => control(Request::Stop)?,
+        Command::Discard => control(Request::Discard)?,
+        Command::Pause => control(Request::Pause)?,
+        Command::Resume => control(Request::Resume)?,
         Command::Import {
             me,
             others,
@@ -149,12 +174,17 @@ pub fn run() -> Result<()> {
         )?,
         Command::Process { id } => {
             let session = store.resolve(&id)?;
-            // The daemon's worker processes a recording session's closed conversations; a
-            // second process doing the same at the same time would race it.
-            if session.load_meta()?.state == SessionState::Recording {
-                bail!("session {} is still recording", session.id);
+            let job = Job::Process {
+                id: session.id.clone(),
+            };
+            if !queue_on_daemon(&job)? {
+                // The daemon's worker processes a recording session's closed conversations;
+                // a second process doing the same at the same time would race it.
+                if session.load_meta()?.state == SessionState::Recording {
+                    bail!("session {} is still recording", session.id);
+                }
+                run_foreground(&store, &config, &job)?;
             }
-            run_job(&store, &config, &Job::Process { id: session.id })?;
         }
         Command::List { since } => list(&store, since.as_deref())?,
         Command::Show { id, summary } => {
@@ -173,7 +203,7 @@ pub fn run() -> Result<()> {
             &store,
             &config,
             &Job::Title {
-                id,
+                id: store.resolve(&id)?.id,
                 title: title.join(" "),
             },
         )?,
@@ -193,15 +223,20 @@ pub fn run() -> Result<()> {
             &store,
             &config,
             &Job::Summarize {
-                id,
+                id: store.resolve(&id)?.id,
                 conversation,
                 lang,
                 backend: backend.map(Into::into),
             },
         )?,
-        Command::Retranscribe { id, model } => {
-            run_job(&store, &config, &Job::Retranscribe { id, model })?
-        }
+        Command::Retranscribe { id, model } => run_job(
+            &store,
+            &config,
+            &Job::Retranscribe {
+                id: store.resolve(&id)?.id,
+                model,
+            },
+        )?,
         Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
         Command::Model {
             command: ModelCommand::List,
@@ -285,8 +320,55 @@ impl Progress {
     }
 }
 
-/// Runs a processing job in the foreground and prints what it reports.
+/// Sends a control command to the daemon, which must be running, and prints its reply.
+fn control(request: Request) -> Result<()> {
+    match ipc::request(&ipc::socket_path()?, &request)? {
+        None => bail!("the kute daemon is not running (start it with `kute daemon`)"),
+        Some(Response::Ok { message }) => println!("{message}"),
+        Some(Response::Status { status }) => print_status(&status),
+        Some(Response::Error { message }) => bail!("{message}"),
+    }
+    Ok(())
+}
+
+fn print_status(status: &Status) {
+    let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+    println!("phase: {}", format!("{:?}", status.phase).to_lowercase());
+    println!("paused: {}", if status.paused { "yes" } else { "no" });
+    println!("session: {}", or_dash(&status.session));
+    println!("app: {}", or_dash(&status.app));
+    println!("queued: {}", status.queued);
+    println!("running: {}", or_dash(&status.running_job));
+}
+
+/// Hands a processing job to the daemon if it is running, and prints its reply. Returns
+/// whether it did.
+fn queue_on_daemon(job: &Job) -> Result<bool> {
+    // Without a runtime dir there is no socket, so no daemon.
+    let Ok(path) = ipc::socket_path() else {
+        return Ok(false);
+    };
+    match ipc::request(&path, &Request::Job { job: job.clone() })? {
+        None => Ok(false),
+        Some(Response::Ok { message }) => {
+            println!("{message}");
+            Ok(true)
+        }
+        Some(Response::Error { message }) => bail!("{message}"),
+        Some(Response::Status { .. }) => bail!("the daemon sent a status instead of an answer"),
+    }
+}
+
+/// Queues a processing job on the daemon, or runs it here when there is no daemon.
 fn run_job(store: &Store, config: &Config, job: &Job) -> Result<()> {
+    if queue_on_daemon(job)? {
+        return Ok(());
+    }
+    run_foreground(store, config, job)
+}
+
+/// Runs a processing job in the foreground and prints what it reports.
+fn run_foreground(store: &Store, config: &Config, job: &Job) -> Result<()> {
     let outcome = jobs::run(store, config, &mut None, job)?;
     if !outcome.message.is_empty() {
         println!("{}", outcome.message);

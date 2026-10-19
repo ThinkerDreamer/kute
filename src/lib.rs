@@ -4,6 +4,7 @@ pub mod audio;
 pub mod capture;
 pub mod cli;
 pub mod config;
+pub mod daemon;
 pub mod detect;
 pub mod import;
 pub mod index;

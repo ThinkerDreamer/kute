@@ -22,6 +22,9 @@ pub struct WorkerDone {
     pub result: Result<Outcome, String>,
     /// When to run the session's processing again, after a failed transcription.
     pub retry_after: Option<Duration>,
+    /// The session the job worked on, when it got as far as having one: an `Import`'s
+    /// retry processes the session it created.
+    pub session: Option<String>,
 }
 
 /// Starts the worker. It runs jobs until `Shutdown`, or until either channel closes. The
@@ -60,11 +63,15 @@ fn spawn_with(
                         Err(anyhow::anyhow!("job panicked: {}", panic_message(&*panic)))
                     }
                 };
-                let retry_after = retry_after(&store, &job, &result);
+                let session = session_of(&result);
+                let retry_after = session
+                    .as_deref()
+                    .and_then(|id| retry_after(&store, &job, id));
                 let done_msg = WorkerDone {
                     job,
                     result: result.map_err(|e| format!("{e:#}")),
                     retry_after,
+                    session,
                 };
                 if done.send(done_msg).is_err() {
                     break;
@@ -90,18 +97,22 @@ pub fn startup_jobs(store: &Store) -> Result<Vec<Job>> {
     Ok(jobs)
 }
 
-/// For a job that transcribes, the backoff before its session's failed transcriptions are
+/// The session a job's result names: its outcome's, or the one whose conversations failed.
+fn session_of(result: &Result<Outcome>) -> Option<String> {
+    match result {
+        Ok(outcome) => outcome.session.clone(),
+        Err(e) => Some(e.downcast_ref::<ConversationsFailed>()?.session.clone()),
+    }
+}
+
+/// For a job that transcribes, the backoff before session `id`'s failed transcriptions are
 /// tried again.
-fn retry_after(store: &Store, job: &Job, result: &Result<Outcome>) -> Option<Duration> {
+fn retry_after(store: &Store, job: &Job, id: &str) -> Option<Duration> {
     let transcribes = matches!(job, Job::Process { .. } | Job::Import { process: true, .. });
     if !transcribes {
         return None;
     }
-    let id = match result {
-        Ok(outcome) => outcome.session.clone()?,
-        Err(e) => e.downcast_ref::<ConversationsFailed>()?.session.clone(),
-    };
-    let meta = store.session(&id).and_then(|s| s.load_meta());
+    let meta = store.session(id).and_then(|s| s.load_meta());
     match meta {
         Ok(meta) => jobs::retry_delay(&meta),
         Err(e) => {
@@ -193,6 +204,7 @@ mod tests {
         );
         assert!(first.result.is_err());
         assert_eq!(first.retry_after, None);
+        assert_eq!(first.session, None);
         let second = done_rx.recv().unwrap();
         assert_eq!(second.job, Job::Reindex);
         assert_eq!(second.result.unwrap().message, "indexed 0 sessions");

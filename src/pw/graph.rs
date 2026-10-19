@@ -28,12 +28,39 @@ pub struct Stream {
     pub running: bool,
 }
 
+/// An `Audio/Source*` node: a device `capture.mic` can pin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    /// `node.name`
+    pub name: String,
+    /// `node.description`
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     /// Sorted by serial.
     pub streams: Vec<Stream>,
     pub default_source: Option<String>,
     pub default_sink: Option<String>,
+    /// So the daemon can resolve `capture.mic` from a snapshot.
+    pub sources: Vec<Source>,
+}
+
+impl Snapshot {
+    /// The `node.name` of the first source whose `node.name` or `node.description`
+    /// contains `substring`, ignoring case.
+    pub fn find_source(&self, substring: &str) -> Option<String> {
+        let needle = substring.to_lowercase();
+        self.sources
+            .iter()
+            .find(|s| {
+                std::iter::once(&s.name)
+                    .chain(&s.description)
+                    .any(|v| v.to_lowercase().contains(&needle))
+            })
+            .map(|s| s.name.clone())
+    }
 }
 
 #[derive(Default)]
@@ -196,10 +223,22 @@ impl Graph {
         streams.sort_by_key(|s| s.serial);
 
         let defaults = self.metadata.values().find(|m| m.is_default);
+        let sources = self
+            .nodes
+            .values()
+            .filter(|n| n.is_source())
+            .filter_map(|n| {
+                Some(Source {
+                    name: n.str("node.name")?,
+                    description: n.str("node.description"),
+                })
+            })
+            .collect();
         Snapshot {
             streams,
             default_source: defaults.and_then(|d| d.source.clone()),
             default_sink: defaults.and_then(|d| d.sink.clone()),
+            sources,
         }
     }
 
@@ -214,20 +253,9 @@ impl Graph {
         })
     }
 
-    /// The `node.name` of the first `Audio/Source*` node whose `node.name` or
-    /// `node.description` contains `substring`, ignoring case.
+    /// See `Snapshot::find_source`.
     pub fn find_source(&self, substring: &str) -> Option<String> {
-        let needle = substring.to_lowercase();
-        self.nodes
-            .values()
-            .filter(|n| n.is_source())
-            .find(|n| {
-                ["node.name", "node.description"]
-                    .iter()
-                    .filter_map(|key| n.str(key))
-                    .any(|v| v.to_lowercase().contains(&needle))
-            })
-            .and_then(|n| n.str("node.name"))
+        self.snapshot().find_source(substring)
     }
 }
 
@@ -513,6 +541,9 @@ mod tests {
             Some("alsa_input.pci-analog")
         );
         assert_eq!(g.find_source("bluetooth"), None);
+        // The daemon resolves `capture.mic` from snapshots, which carry the sources.
+        let names: Vec<_> = g.snapshot().sources.into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["alsa_input.pci-analog", "alsa_input.usb-headset"]);
 
         let g = graph(&[
             node(

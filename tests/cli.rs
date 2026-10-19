@@ -2,8 +2,10 @@
 
 use std::process::Command;
 
+/// Runs kute with the test's own runtime dir, so it never finds a real daemon's socket.
 fn kute(config: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_kute"))
+        .env("XDG_RUNTIME_DIR", config.parent().unwrap())
         .arg("--config")
         .arg(config)
         .args(args)
@@ -40,6 +42,13 @@ fn help_lists_commands() {
         "retranscribe",
         "reindex",
         "model",
+        "daemon",
+        "status",
+        "record",
+        "stop",
+        "discard",
+        "pause",
+        "resume",
     ] {
         assert!(text.contains(cmd), "missing {cmd} in:\n{text}");
     }
@@ -122,4 +131,25 @@ fn list_shows_newest_first() {
     let out = String::from_utf8_lossy(&kute(&config, &["list"]).stdout).into_owned();
     let newer = out.find("newer").expect(&out);
     assert!(newer < out.find("older").expect(&out), "{out}");
+}
+
+#[test]
+fn control_commands_without_a_daemon() {
+    let (_tmp, config) = setup();
+    for args in [
+        &["status"][..],
+        &["record", "Standup"],
+        &["stop"],
+        &["discard"],
+        &["pause"],
+        &["resume"],
+    ] {
+        let out = kute(&config, args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("the kute daemon is not running (start it with `kute daemon`)"),
+            "{args:?}: {err}"
+        );
+    }
 }

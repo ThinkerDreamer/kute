@@ -41,6 +41,8 @@ min_words = 1
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let kute = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_kute"))
+            // A daemon running for real would take the jobs into its own archive.
+            .env("XDG_RUNTIME_DIR", tmp.path())
             .arg("--config")
             .arg(&config)
             .args(args)
