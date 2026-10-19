@@ -118,11 +118,12 @@ impl Daemon {
     /// monitor reconnects, so the detector sees no streams: an automatic session ends the
     /// way it would if the call had ended, unless the call is back in time; a manual one
     /// carries on. Not the user's stop, so nothing blocks the call from being picked up
-    /// again (R24).
+    /// again (R24); a block the user's stop already set stays until a snapshot after the
+    /// reconnect shows the mic gone (R26).
     fn disconnected(&mut self, reason: &str, now_ms: u64) -> Result<()> {
         eprintln!("kute: lost the PipeWire graph: {reason}");
         self.snapshot = Snapshot::default();
-        let actions = self.detector.streams(&[], now_ms);
+        let actions = self.detector.graph_lost(now_ms);
         self.apply(actions)
     }
 

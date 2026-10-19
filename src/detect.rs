@@ -74,6 +74,9 @@ pub struct Detector {
     blocked: bool,
     /// When the blocked detector last saw no mic stream.
     quiet_since: Option<u64>,
+    /// Set by `graph_lost` until the next snapshot: the empty `last` only means the
+    /// streams are unknown, so it doesn't count as quiet time toward lifting `blocked`.
+    lost: bool,
 }
 
 fn ms(d: SignedDuration) -> u64 {
@@ -110,6 +113,7 @@ impl Detector {
             dead_since: None,
             blocked: false,
             quiet_since: None,
+            lost: false,
         }
     }
 
@@ -118,6 +122,7 @@ impl Detector {
         if self.paused {
             return Vec::new();
         }
+        self.lost = false;
         self.last = streams.to_vec();
         let mut actions = Vec::new();
         if self.phase == Phase::Idle {
@@ -141,6 +146,19 @@ impl Detector {
         }
         actions.extend(self.advance(now_ms));
         actions
+    }
+
+    /// The monitor lost the PipeWire graph: no stream is known until the next snapshot.
+    /// An automatic session ends as if the call had ended, but the time without a graph
+    /// doesn't lift the restart block of a `stop` or `discard` (R26).
+    pub fn graph_lost(&mut self, now_ms: u64) -> Vec<Action> {
+        if self.paused {
+            return Vec::new();
+        }
+        self.lost = true;
+        self.quiet_since = None;
+        self.last.clear();
+        self.advance(now_ms)
     }
 
     /// Time passing without a new snapshot.
@@ -247,13 +265,13 @@ impl Detector {
         self.quiet_since = None;
     }
 
-    /// Whether automatic Start is still blocked, lifting the block once the mic has been
-    /// gone for `MIC_GAP_MS`.
+    /// Whether automatic Start is still blocked, lifting the block once snapshots have
+    /// shown no mic for `MIC_GAP_MS`.
     fn blocked(&mut self, now_ms: u64) -> bool {
         if !self.blocked {
             return false;
         }
-        if self.live_mics().next().is_some() {
+        if self.lost || self.live_mics().next().is_some() {
             self.quiet_since = None;
             return true;
         }
@@ -797,5 +815,87 @@ mod tests {
         assert_eq!(d.phase(), Phase::Grace);
         assert_eq!(d.pause(), vec![Action::Finish]);
         assert_eq!(d.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn a_lost_graph_does_not_lift_the_restart_block() {
+        let mut d = recording();
+        d.stop().unwrap();
+        assert!(
+            d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 30_000)
+                .is_empty()
+        );
+        assert!(d.graph_lost(31_000).is_empty());
+        for t in (32..=91).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        // The monitor reconnects and the call is still on.
+        assert!(
+            d.streams(&[mic(88, jitsi()), out(114, jitsi(), true)], 92_000)
+                .is_empty()
+        );
+        assert!(d.tick(93_000).is_empty());
+        assert_eq!(d.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn the_restart_block_counts_quiet_time_from_the_first_snapshot_after_reconnect() {
+        let mut d = recording();
+        d.stop().unwrap();
+        d.graph_lost(30_000);
+        d.tick(40_000);
+        // The call ended while the graph was lost.
+        assert!(d.streams(&[], 50_000).is_empty());
+        assert!(d.tick(51_999).is_empty());
+        assert!(d.streams(&[mic(88, jitsi())], 51_999).is_empty());
+        d.streams(&[], 52_000);
+        assert!(d.tick(54_000).is_empty());
+        assert!(matches!(
+            d.streams(&[mic(95, jitsi())], 54_500)[..],
+            [Action::Start { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_stop_while_the_graph_is_lost_blocks_until_a_snapshot() {
+        let mut d = recording();
+        assert!(d.graph_lost(30_000).is_empty());
+        assert_eq!(d.stop(), Ok(vec![Action::Finish]));
+        for t in (31..=90).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        assert!(d.streams(&[mic(88, jitsi())], 91_000).is_empty());
+        assert!(d.tick(92_000).is_empty());
+        assert_eq!(d.phase(), Phase::Idle);
+        d.streams(&[], 93_000);
+        assert!(d.tick(95_000).is_empty());
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi())], 95_500)[..],
+            [Action::Start { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_lost_graph_ends_automatic_sessions_as_if_the_call_ended() {
+        let mut d = recording();
+        assert!(d.graph_lost(100_000).is_empty());
+        assert!(d.tick(102_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert!(d.tick(114_999).is_empty());
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
+
+        // A Tentative one is discarded once the gap is confirmed.
+        assert!(matches!(
+            d.streams(&[mic(88, jitsi())], 120_000)[..],
+            [Action::Start { .. }]
+        ));
+        assert!(d.graph_lost(121_000).is_empty());
+        assert_eq!(d.tick(123_000), vec![Action::Discard]);
+
+        // A manual one carries on.
+        d.record(130_000).unwrap();
+        assert!(d.graph_lost(131_000).is_empty());
+        assert!(d.tick(200_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
     }
 }

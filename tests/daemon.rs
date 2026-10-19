@@ -447,6 +447,27 @@ fn a_pipewire_disconnect_ends_a_detected_session_as_if_the_call_ended() {
 }
 
 #[test]
+fn a_pipewire_disconnect_does_not_restart_a_call_the_user_stopped() {
+    let mut h = Harness::new();
+    h.snapshot(call()).unwrap();
+    h.tick_until(30_000);
+    let id = h.daemon.status().session.unwrap();
+    assert_eq!(h.ok(Request::Stop), format!("stopped {id}"));
+    assert_eq!(h.sent(), vec![Job::Process { id }]);
+
+    h.disconnect();
+    h.tick_until(60_000);
+    // The monitor reconnects and the call the user stopped is still on.
+    h.snapshot(call()).unwrap();
+    h.tick_until(61_000);
+    let status = h.daemon.status();
+    assert_eq!(status.phase, Phase::Idle);
+    assert_eq!(status.session, None);
+    assert_eq!(h.store.list().unwrap().len(), 1);
+    assert!(h.sent().is_empty());
+}
+
+#[test]
 fn a_pipewire_disconnect_leaves_a_manual_session_alone() {
     let mut h = Harness::new();
     h.ok(Request::Record { title: None });
