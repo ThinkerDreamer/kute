@@ -351,7 +351,11 @@ fn queue_on_daemon(job: &Job) -> Result<bool> {
     match ipc::request(&path, &Request::Job { job: job.clone() })? {
         None => Ok(false),
         Some(Response::Ok { message }) => {
-            println!("{message}");
+            // Until there are notifications, failures only show up in the daemon's log.
+            println!(
+                "{message}; the daemon logs the result (journalctl --user -u kute, or the \
+                 terminal running kute daemon)"
+            );
             Ok(true)
         }
         Some(Response::Error { message }) => bail!("{message}"),

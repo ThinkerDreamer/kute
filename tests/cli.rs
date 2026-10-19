@@ -153,3 +153,31 @@ fn control_commands_without_a_daemon() {
         );
     }
 }
+
+#[test]
+fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
+    use kute::ipc::{Request, Response};
+    use kute::jobs::Job;
+    let (tmp, config) = setup();
+    // A stand-in daemon on the socket the CLI looks for.
+    let (tx, rx) = std::sync::mpsc::channel::<kute::ipc::Incoming>();
+    kute::ipc::serve(&tmp.path().join("kute.sock"), tx).unwrap();
+    std::thread::spawn(move || {
+        for incoming in rx {
+            assert_eq!(incoming.request, Request::Job { job: Job::Reindex });
+            let message = "queued reindex".into();
+            let _ = incoming.reply.send(Response::Ok { message });
+        }
+    });
+    let out = kute(&config, &["reindex"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "queued reindex; the daemon logs the result (journalctl --user -u kute, or the \
+         terminal running kute daemon)\n"
+    );
+}
