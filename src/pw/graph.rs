@@ -62,6 +62,12 @@ impl Node {
     fn class(&self) -> Option<&str> {
         self.props.get("media.class")?.as_str()
     }
+
+    /// `Audio/Source` or a variant such as `Audio/Source/Virtual` (noise suppression, echo
+    /// cancel). Sink monitors are `Audio/Sink` nodes, so they don't count.
+    fn is_source(&self) -> bool {
+        self.class().is_some_and(|c| c.starts_with("Audio/Source"))
+    }
 }
 
 #[derive(Default)]
@@ -97,7 +103,12 @@ impl Graph {
             // `info` at all.
             let null = |key| obj.get(key).is_some_and(Value::is_null);
             if null("info") || null("type") {
-                self.nodes.remove(&id);
+                // A link to a removed node is stale even before its own removal arrives,
+                // and the node's id may be reused.
+                if self.nodes.remove(&id).is_some() {
+                    self.links
+                        .retain(|_, l| l.input != Some(id) && l.output != Some(id));
+                }
                 self.links.remove(&id);
                 self.metadata.remove(&id);
                 continue;
@@ -192,24 +203,24 @@ impl Graph {
         }
     }
 
-    /// Whether some link goes from an `Audio/Source` node into node `id`.
+    /// Whether some link goes from an `Audio/Source*` node into node `id`.
     fn fed_by_source(&self, id: u64) -> bool {
         self.links.values().any(|link| {
             link.input == Some(id)
                 && link
                     .output
                     .and_then(|out| self.nodes.get(&out))
-                    .is_some_and(|n| n.class() == Some("Audio/Source"))
+                    .is_some_and(Node::is_source)
         })
     }
 
-    /// The `node.name` of the first `Audio/Source` whose `node.name` or `node.description`
-    /// contains `substring`, ignoring case.
+    /// The `node.name` of the first `Audio/Source*` node whose `node.name` or
+    /// `node.description` contains `substring`, ignoring case.
     pub fn find_source(&self, substring: &str) -> Option<String> {
         let needle = substring.to_lowercase();
         self.nodes
             .values()
-            .filter(|n| n.class() == Some("Audio/Source"))
+            .filter(|n| n.is_source())
             .find(|n| {
                 ["node.name", "node.description"]
                     .iter()
@@ -330,28 +341,46 @@ mod tests {
         let mut g = graph(&[
             node(30, 300, SOURCE, &[], "running"),
             node(40, 400, MIC_IN, &[], "running"),
+            node(41, 410, MIC_IN, &[], "running"),
             node(50, 500, OUT, &[], "running"),
             link(70, 30, 40),
+            link(71, 30, 41),
         ]);
-        assert_eq!(g.snapshot().streams.len(), 2);
+        assert_eq!(g.snapshot().streams.len(), 3);
 
         g.apply(&[removed(70)]);
         let serials: Vec<u64> = g.snapshot().streams.iter().map(|s| s.serial).collect();
-        assert_eq!(serials, vec![500]);
+        assert_eq!(serials, vec![410, 500]);
 
         g.apply(&[removed(50)]);
+        let serials: Vec<u64> = g.snapshot().streams.iter().map(|s| s.serial).collect();
+        assert_eq!(serials, vec![410]);
+
+        // Removing the source takes its links along, so a new source that reuses its id
+        // doesn't inherit them.
+        g.apply(&[removed(30)]);
+        assert!(g.snapshot().streams.is_empty());
+        g.apply(&[node(30, 900, SOURCE, &[], "running")]);
         assert!(g.snapshot().streams.is_empty());
     }
 
     #[test]
-    fn removed_source_takes_the_mic_stream_with_it() {
-        let mut g = graph(&[
-            node(30, 300, SOURCE, &[], "running"),
+    fn any_audio_source_class_feeds_a_mic() {
+        let g = graph(&[
+            node(30, 300, "Audio/Source/Virtual", &[], "running"),
+            node(31, 310, "Audio/Sink", &[], "running"),
             node(40, 400, MIC_IN, &[], "running"),
+            node(41, 410, MIC_IN, &[], "running"),
             link(70, 30, 40),
+            link(71, 31, 41),
         ]);
-        g.apply(&[removed(30)]);
-        assert!(g.snapshot().streams.is_empty());
+        let kinds: Vec<(u64, StreamKind)> = g
+            .snapshot()
+            .streams
+            .iter()
+            .map(|s| (s.serial, s.kind))
+            .collect();
+        assert_eq!(kinds, vec![(400, StreamKind::Mic)]);
     }
 
     #[test]
@@ -484,5 +513,26 @@ mod tests {
             Some("alsa_input.pci-analog")
         );
         assert_eq!(g.find_source("bluetooth"), None);
+
+        let g = graph(&[
+            node(
+                32,
+                302,
+                "Audio/Sink",
+                &[("node.name", "noise-cancel-sink")],
+                "idle",
+            ),
+            node(
+                33,
+                303,
+                "Audio/Source/Virtual",
+                &[("node.name", "noise-cancel-source")],
+                "idle",
+            ),
+        ]);
+        assert_eq!(
+            g.find_source("noise").as_deref(),
+            Some("noise-cancel-source")
+        );
     }
 }

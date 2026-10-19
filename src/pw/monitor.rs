@@ -3,7 +3,7 @@
 use super::{Graph, Snapshot};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
@@ -19,6 +19,8 @@ pub enum MonitorEvent {
 /// Feeds `pw-dump`'s concatenated JSON arrays into a fresh graph, and calls `on_change`
 /// after every array that changed the snapshot. The first array always counts as a change.
 pub fn read_updates(r: impl Read, mut on_change: impl FnMut(Snapshot)) -> Result<()> {
+    // `from_reader` reads a byte at a time, so give it a buffer.
+    let r = BufReader::new(r);
     let mut graph = Graph::default();
     let mut last = None;
     for update in serde_json::Deserializer::from_reader(r).into_iter::<Vec<Value>>() {
