@@ -89,8 +89,45 @@ pub fn render_summary(meta: &Meta, summaries: &[(&Conversation, String)]) -> Str
         out.push_str(&format!(
             "\n## {}\n\n{}\n",
             time_range(meta, c),
-            text.trim()
+            nest_headings(text).trim()
         ));
+    }
+    out
+}
+
+/// A heading's level: `## A` is 2. `None` for anything else, `#hashtag` included.
+fn heading_level(line: &str) -> Option<usize> {
+    let level = line.chars().take_while(|&c| c == '#').count();
+    let rest = &line[level..];
+    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with(' '))).then_some(level)
+}
+
+/// Pushes a conversation summary's headings down so the shallowest is `###`, under the
+/// conversation's `##` heading, keeping their relative depth (at most six levels). Lines in
+/// fenced code blocks are left alone.
+fn nest_headings(text: &str) -> String {
+    let mut fenced = false;
+    let mut levels = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced && let Some(level) = heading_level(line) {
+            levels.push(level);
+        }
+    }
+    let shift = match levels.iter().min() {
+        Some(&min) if min < 3 => 3 - min,
+        _ => return text.to_string(),
+    };
+    let mut fenced = false;
+    let mut out = String::with_capacity(text.len() + 8);
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced && let Some(level) = heading_level(line.trim_end_matches('\n')) {
+            out.push_str(&"#".repeat((level + shift).min(6) - level));
+        }
+        out.push_str(line);
     }
     out
 }
@@ -185,13 +222,29 @@ _No speech detected._
     }
 
     #[test]
+    fn summary_headings_sit_under_the_conversation() {
+        // Whatever level the summarizer starts at, its headings go below "## <time range>",
+        // keep their relative depth, and code blocks are left alone.
+        let text = "# Notes\n\n## Decisions\n\n- Ship it.\n\n```sh\n# not a heading\n```\n";
+        assert_eq!(
+            nest_headings(text),
+            "### Notes\n\n#### Decisions\n\n- Ship it.\n\n```sh\n# not a heading\n```\n"
+        );
+        // Already deep enough: unchanged. No headings: unchanged. "#hashtag" isn't one.
+        assert_eq!(nest_headings("### A\n#### B\n"), "### A\n#### B\n");
+        assert_eq!(nest_headings("#hashtag and text\n"), "#hashtag and text\n");
+        // Never deeper than Markdown's six levels.
+        assert_eq!(nest_headings("# A\n###### F\n"), "### A\n###### F\n");
+    }
+
+    #[test]
     fn summary_layout_and_word_count() {
         let m = meta();
         let c1 = &m.conversations[0];
         let got = render_summary(&m, &[(c1, "## Summary\n\nWe met.\n\n".into())]);
         assert_eq!(
             got,
-            "# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)\n\n## 09:40 to 09:53\n\n## Summary\n\nWe met.\n"
+            "# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)\n\n## 09:40 to 09:53\n\n### Summary\n\nWe met.\n"
         );
         let lines = conversation_lines(
             c1,
