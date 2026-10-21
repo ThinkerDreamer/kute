@@ -139,9 +139,11 @@ impl Harness {
 
     /// Ticks without moving the fake clock until the session ends, waiting for the track
     /// threads in real time.
-    fn tick_until_idle(&mut self) {
+    /// Ticks (in real time, so the capture threads can report) until session `id` is over.
+    /// The detector may already be in a new session by then.
+    fn tick_until_ended(&mut self, id: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        while self.phase() != Phase::Idle {
+        while self.daemon.status().session.as_deref() == Some(id) {
             assert!(Instant::now() < deadline, "the session never ended");
             std::thread::sleep(Duration::from_millis(10));
             self.daemon.handle(Event::Tick, self.now).unwrap();
@@ -590,7 +592,7 @@ fn a_capture_that_ends_on_its_own_finishes_the_session() {
     let mut h = Harness::with(Config::default(), |_| Box::new(Short));
     h.ok(Request::Record { title: None });
     let id = h.daemon.status().session.unwrap();
-    h.tick_until_idle();
+    h.tick_until_ended(&id);
     let meta = h.store.session(&id).unwrap().load_meta().unwrap();
     assert_eq!(meta.state, SessionState::Processing);
     assert_eq!(h.sent(), vec![Job::Process { id }]);
@@ -607,11 +609,40 @@ fn a_capture_that_dies_mid_call_does_not_block_the_call() {
     h.tick_until(30_000);
     assert_eq!(h.phase(), Phase::Recording);
     h.source.close(Track::Me);
-    h.tick_until_idle();
+    h.tick_until_ended(&id);
     assert_eq!(h.sent(), vec![Job::Process { id: id.clone() }]);
 
     // pw-record leaving the graph makes a snapshot: the call is still on.
     h.snapshot(call()).unwrap();
+    let status = h.daemon.status();
+    assert_eq!(status.phase, Phase::Tentative);
+    assert_ne!(status.session, Some(id));
+}
+
+/// A PipeWire/WirePlumber restart: both captures die and the call app reconnects, all
+/// before the daemon notices, so the graph has settled by the time the session ends and no
+/// snapshot follows. The call is still on: a new session must start without one (seen on
+/// 2026-10-21, where the call went unrecorded until kute was restarted).
+#[test]
+fn a_capture_that_dies_after_the_graph_settled_starts_a_new_session() {
+    let mut h = Harness::new();
+    h.snapshot(call()).unwrap();
+    let id = h.daemon.status().session.unwrap();
+    for track in Track::BOTH {
+        h.source.writer(track).write_all(&pcm(1, 0..0)).unwrap();
+    }
+    h.tick_until(30_000);
+    assert_eq!(h.phase(), Phase::Recording);
+    // The last snapshot: the call's mic, relinked; kute's captures already gone.
+    h.snapshot(call()).unwrap();
+    for track in Track::BOTH {
+        h.source.close(track);
+    }
+    h.tick_until_ended(&id);
+    assert_eq!(h.sent(), vec![Job::Process { id: id.clone() }]);
+
+    // No snapshot from here on: the graph doesn't change again.
+    h.tick_until(h.now + 1_000);
     let status = h.daemon.status();
     assert_eq!(status.phase, Phase::Tentative);
     assert_ne!(status.session, Some(id));
@@ -631,7 +662,9 @@ fn a_capture_that_dies_at_once_discards_and_blocks_the_call() {
     let mut h = Harness::with(Config::default(), |_| Box::new(Empty));
     h.snapshot(call()).unwrap();
     assert_eq!(h.phase(), Phase::Tentative);
-    h.tick_until_idle();
+    let id = h.daemon.status().session.unwrap();
+    h.tick_until_ended(&id);
+    assert_eq!(h.phase(), Phase::Idle);
     // Nothing was recorded: no folder, nothing to process.
     assert!(h.store.list().unwrap().is_empty());
     assert!(h.sent().is_empty());

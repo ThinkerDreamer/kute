@@ -124,26 +124,33 @@ impl Detector {
         }
         self.lost = false;
         self.last = streams.to_vec();
-        let mut actions = Vec::new();
         if self.phase == Phase::Idle {
-            if self.blocked(now_ms) {
-                return actions;
-            }
-            // Lowest serial first, since the graph sorts its streams but callers may not.
-            let Some(first) = self
-                .live_mics()
-                .min_by_key(|s| s.serial)
-                .map(|s| s.app.clone())
-            else {
-                return actions;
-            };
-            self.phase = Phase::Tentative;
-            self.trigger = Some(first.clone());
-            self.started_ms = now_ms;
-            actions.push(Action::Start {
-                trigger: Some(first),
-            });
+            return self.start_if_called(now_ms);
         }
+        self.advance(now_ms)
+    }
+
+    /// While Idle: starts a session if the last snapshot has a live mic and nothing blocks
+    /// it. Runs on every snapshot and every tick, because a session the daemon ended (a
+    /// capture failed) can leave the call's mic open in a graph that won't change again.
+    fn start_if_called(&mut self, now_ms: u64) -> Vec<Action> {
+        if self.paused || self.blocked(now_ms) {
+            return Vec::new();
+        }
+        // Lowest serial first, since the graph sorts its streams but callers may not.
+        let Some(first) = self
+            .live_mics()
+            .min_by_key(|s| s.serial)
+            .map(|s| s.app.clone())
+        else {
+            return Vec::new();
+        };
+        self.phase = Phase::Tentative;
+        self.trigger = Some(first.clone());
+        self.started_ms = now_ms;
+        let mut actions = vec![Action::Start {
+            trigger: Some(first),
+        }];
         actions.extend(self.advance(now_ms));
         actions
     }
@@ -163,7 +170,9 @@ impl Detector {
 
     /// Time passing without a new snapshot.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
-        self.blocked(now_ms);
+        if self.phase == Phase::Idle {
+            return self.start_if_called(now_ms);
+        }
         self.advance(now_ms)
     }
 
