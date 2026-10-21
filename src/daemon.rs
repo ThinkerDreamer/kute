@@ -11,6 +11,7 @@ use crate::ipc::{self, Incoming, Request, Response, Status};
 use crate::jobs::Job;
 use crate::live::{self, LiveSession, StartRequest};
 use crate::models;
+use crate::notify::{self, Desktop, Notifier, Silent};
 use crate::pipeline;
 use crate::pw::{self, App, MonitorEvent, Snapshot};
 use crate::recorder::VadFactory;
@@ -55,6 +56,7 @@ pub struct Daemon {
     worker: Sender<WorkerMsg>,
     source: Box<dyn CaptureSource>,
     vad: VadFactory,
+    notifier: Box<dyn Notifier>,
 }
 
 impl Daemon {
@@ -78,7 +80,14 @@ impl Daemon {
             worker,
             source,
             vad,
+            notifier: Box::new(Silent),
         }
+    }
+
+    /// Where announcements go (a summary is ready). Silent unless set.
+    pub fn with_notifier(mut self, notifier: Box<dyn Notifier>) -> Daemon {
+        self.notifier = notifier;
+        self
     }
 
     pub fn handle(&mut self, event: Event, now_ms: u64) -> Result<()> {
@@ -272,6 +281,9 @@ impl Daemon {
             Ok(_) => eprintln!("kute: {}: done", done.job),
             Err(e) => eprintln!("kute: {} failed: {e}", done.job),
         }
+        if let Ok(outcome) = &done.result {
+            self.announce_summaries(outcome);
+        }
         let discarded = std::mem::take(&mut self.discarded);
         for id in &discarded {
             unindex(&self.store, id);
@@ -285,6 +297,24 @@ impl Daemon {
             self.retries.push((at, Job::Process { id }));
         }
         self.start_next()
+    }
+
+    /// A notification for the summaries a job just wrote, if any. A session that's gone
+    /// (discarded meanwhile) gets none.
+    fn announce_summaries(&self, outcome: &crate::jobs::Outcome) {
+        let Some(id) = &outcome.session else { return };
+        if outcome.summarized.is_empty() {
+            return;
+        }
+        let Ok(session) = self.store.session(id) else {
+            return;
+        };
+        let Ok(meta) = session.load_meta() else {
+            return;
+        };
+        if let Some(note) = notify::summary_note(&session, &meta, &outcome.summarized) {
+            self.notifier.notify(note);
+        }
     }
 
     /// Queues a job and starts it if the worker is free. A `Process` already waiting
@@ -465,7 +495,9 @@ pub fn run(store: Store, config: Config) -> Result<()> {
     drop(events_tx);
 
     let vad = vad_factory(&store);
-    let mut daemon = Daemon::new(store, config, Box::new(PwRecord), vad, work_tx);
+    let desktop = Box::new(Desktop::new(&config.notify));
+    let mut daemon =
+        Daemon::new(store, config, Box::new(PwRecord), vad, work_tx).with_notifier(desktop);
     for job in startup {
         daemon.enqueue(job)?;
     }

@@ -108,3 +108,19 @@ impl Write for FakeWriter {
         Ok(())
     }
 }
+
+/// A `Notifier` that keeps every note, for tests.
+#[derive(Clone, Default)]
+pub struct RecordingNotifier(pub std::sync::Arc<std::sync::Mutex<Vec<crate::notify::Note>>>);
+
+impl RecordingNotifier {
+    pub fn notes(&self) -> Vec<crate::notify::Note> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl crate::notify::Notifier for RecordingNotifier {
+    fn notify(&self, note: crate::notify::Note) {
+        self.0.lock().unwrap().push(note);
+    }
+}

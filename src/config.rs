@@ -15,6 +15,7 @@ pub struct Config {
     pub summary: SummaryConfig,
     pub detect: DetectConfig,
     pub capture: CaptureConfig,
+    pub notify: NotifyConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -141,6 +142,22 @@ pub struct CaptureConfig {
     pub mic: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// The command that opens a summary when its notification is clicked; the file's path is
+    /// added as the last argument.
+    pub open: Vec<String>,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            open: vec!["xdg-open".into()],
+        }
+    }
+}
+
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("kute").join("config.toml"))
@@ -262,6 +279,13 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
         assert_eq!(expand_tilde(Path::new("/x/~/y")), PathBuf::from("/x/~/y"));
+    }
+
+    #[test]
+    fn notify_open_defaults_to_xdg_open() {
+        assert_eq!(Config::parse("").unwrap().notify.open, ["xdg-open"]);
+        let c = Config::parse("[notify]\nopen = [\"kate\"]\n").unwrap();
+        assert_eq!(c.notify.open, ["kate"]);
     }
 
     #[test]

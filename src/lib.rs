@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod live;
 pub mod merge;
 pub mod models;
+pub mod notify;
 pub mod pipeline;
 pub mod pw;
 pub mod recorder;

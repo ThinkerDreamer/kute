@@ -71,11 +71,13 @@ impl std::fmt::Display for Job {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Outcome {
     /// What the CLI prints on stdout; may be empty.
     pub message: String,
     pub session: Option<String>,
+    /// Conversations this job wrote a summary for (the daemon announces them).
+    pub summarized: Vec<u32>,
 }
 
 /// The error a job returns when the pipeline left conversations failed. It carries the
@@ -113,12 +115,12 @@ pub fn run(
         Job::Process { id } => {
             let session = store.resolve(id)?;
             let provider = provider(asr, config, store)?;
-            let message = run_pipeline(store, config, &session, Some(provider), Work::Process)?;
-            Ok(outcome(message, &session))
+            let done = run_pipeline(store, config, &session, Some(provider), Work::Process)?;
+            Ok(outcome(done, &session))
         }
         Job::Retranscribe { id, model } => {
             let session = store.resolve(id)?;
-            let message = match model {
+            let done = match model {
                 Some(model) => {
                     // Another model for this job only, so it doesn't replace the kept provider.
                     let mut config = config.clone();
@@ -137,7 +139,7 @@ pub fn run(
                     run_pipeline(store, config, &session, Some(provider), Work::Retranscribe)?
                 }
             };
-            Ok(outcome(message, &session))
+            Ok(outcome(done, &session))
         }
         Job::Summarize {
             id,
@@ -153,14 +155,14 @@ pub fn run(
             if let Some(b) = backend {
                 config.summary.backend = *b;
             }
-            let message = run_pipeline(
+            let done = run_pipeline(
                 store,
                 &config,
                 &session,
                 None,
                 Work::Summarize(*conversation),
             )?;
-            Ok(outcome(message, &session))
+            Ok(outcome(done, &session))
         }
         Job::Import {
             me,
@@ -183,30 +185,35 @@ pub fn run(
                     title: title.clone(),
                 },
             )?;
-            let mut message = format!("imported {}", session.id);
+            let mut done = Done {
+                message: format!("imported {}", session.id),
+                summarized: Vec::new(),
+            };
             if *process {
                 let provider = provider(asr, config, store)?;
                 // The session exists now, so a processing error must still say which one.
-                let report = run_pipeline(store, config, &session, Some(provider), Work::Process)
-                    .with_context(|| format!("imported {}", session.id))?;
-                if !report.is_empty() {
-                    message = format!("{message}\n{report}");
+                let processed =
+                    run_pipeline(store, config, &session, Some(provider), Work::Process)
+                        .with_context(|| format!("imported {}", session.id))?;
+                if !processed.message.is_empty() {
+                    done.message = format!("{}\n{}", done.message, processed.message);
                 }
+                done.summarized = processed.summarized;
             }
-            Ok(outcome(message, &session))
+            Ok(outcome(done, &session))
         }
         Job::Title { id, title } => {
             let session = store.resolve(id)?;
             let meta = session.update_meta(|m| m.title = Some(title.clone()))?;
             pipeline::write_documents(&session, &meta, &config.labels)?;
             pipeline::index_session(&pipeline::open_index(store)?, &session)?;
-            Ok(outcome(String::new(), &session))
+            Ok(outcome(Done::default(), &session))
         }
         Job::Reindex => {
             let n = pipeline::reindex_all(store, &Index::open(&store.index_path())?)?;
             Ok(Outcome {
                 message: format!("indexed {n} sessions"),
-                session: None,
+                ..Outcome::default()
             })
         }
     }
@@ -240,10 +247,18 @@ fn provider<'a>(
     Ok(asr.as_mut().expect("set above"))
 }
 
-fn outcome(message: String, session: &Session) -> Outcome {
+/// What a pipeline run left behind: the lines to print and the conversations it summarized.
+#[derive(Default)]
+struct Done {
+    message: String,
+    summarized: Vec<u32>,
+}
+
+fn outcome(done: Done, session: &Session) -> Outcome {
     Outcome {
-        message,
+        message: done.message,
         session: Some(session.id.clone()),
+        summarized: done.summarized,
     }
 }
 
@@ -253,14 +268,15 @@ enum Work {
     Summarize(Option<u32>),
 }
 
-/// Runs the pipeline and returns the lines to print: where the transcript and summary are.
+/// Runs the pipeline and returns the lines to print (where the transcript and summary are)
+/// and the conversations it summarized.
 fn run_pipeline(
     store: &Store,
     config: &Config,
     session: &Session,
     asr: Option<&mut WhisperProvider>,
     work: Work,
-) -> Result<String> {
+) -> Result<Done> {
     let index = pipeline::open_index(store)?;
     let summarizer = summarize::from_config(&config.summary)?;
     let mut pipeline = Pipeline {
@@ -276,7 +292,10 @@ fn run_pipeline(
         Work::Retranscribe => pipeline.retranscribe(session)?,
         Work::Summarize(only) => pipeline.resummarize(session, only)?,
     };
-    check_report(session, &report)
+    Ok(Done {
+        message: check_report(session, &report)?,
+        summarized: report.summarized,
+    })
 }
 
 fn check_report(session: &Session, report: &Report) -> Result<String> {
@@ -325,6 +344,51 @@ mod tests {
         );
         meta.conversations = conversations;
         meta
+    }
+
+    #[test]
+    fn a_summarize_job_reports_what_it_summarized() {
+        // The daemon pops a notification for these, so they must come back in the Outcome.
+        use crate::config::SummaryBackend;
+        use crate::store::{Segment, Track, TrackTranscript};
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let mut m = meta(vec![Conversation::new(1, 0, 5_000)]);
+        m.conversations[0].stage = Stage::Transcribed;
+        let session = store.create_session(&m.started_at).unwrap();
+        m.id = session.id.clone();
+        session.save_meta(&m).unwrap();
+        let segment = Segment {
+            conversation: 1,
+            start_ms: 0,
+            end_ms: 2_000,
+            text: " Let's ship the daemon.".into(),
+            words: Vec::new(),
+        };
+        session
+            .save_track(
+                Track::Me,
+                &TrackTranscript {
+                    segments: vec![segment],
+                },
+            )
+            .unwrap();
+        let mut config = Config::default();
+        config.summary.backend = SummaryBackend::Command;
+        config.summary.command = vec![
+            "sh".into(),
+            "-c".into(),
+            "cat > /dev/null; echo Shipped.".into(),
+        ];
+        config.summary.min_words = 1;
+        let job = Job::Summarize {
+            id: session.id.clone(),
+            conversation: None,
+            lang: None,
+            backend: None,
+        };
+        let outcome = run(&store, &config, &mut None, &job).unwrap();
+        assert_eq!(outcome.summarized, vec![1]);
     }
 
     fn failed(n: u32, step: Step, attempts: u32) -> Conversation {

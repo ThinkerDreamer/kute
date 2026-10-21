@@ -12,7 +12,7 @@ use kute::jobs::{Job, Outcome};
 use kute::merge::Line;
 use kute::pw::{App, MonitorEvent, Snapshot, Source, Stream, StreamKind};
 use kute::store::{Meta, SessionState, Store, Track, Trigger, TriggerKind};
-use kute::testing::{FakeSource, run_vad};
+use kute::testing::{FakeSource, RecordingNotifier, run_vad};
 use kute::worker::{WorkerDone, WorkerMsg};
 use std::io::Write;
 use std::sync::mpsc::{self, Receiver};
@@ -25,6 +25,7 @@ struct Harness {
     source: FakeSource,
     daemon: Daemon,
     worker: Receiver<WorkerMsg>,
+    notes: RecordingNotifier,
     now: u64,
 }
 
@@ -38,13 +39,16 @@ impl Harness {
         let store = Store::open(tmp.path().join("kute")).unwrap();
         let fake = FakeSource::default();
         let (tx, worker) = mpsc::channel();
-        let daemon = Daemon::new(store.clone(), config, source(fake.clone()), run_vad(), tx);
+        let notes = RecordingNotifier::default();
+        let daemon = Daemon::new(store.clone(), config, source(fake.clone()), run_vad(), tx)
+            .with_notifier(Box::new(notes.clone()));
         Harness {
             _tmp: tmp,
             store,
             source: fake,
             daemon,
             worker,
+            notes,
             now: 0,
         }
     }
@@ -87,14 +91,28 @@ impl Harness {
     }
 
     fn done(&mut self, job: Job, session: Option<&str>, retry_after: Option<Duration>) {
+        let outcome = Outcome {
+            session: session.map(Into::into),
+            ..Outcome::default()
+        };
+        self.finished(job, Ok(outcome), retry_after);
+    }
+
+    fn finished(
+        &mut self,
+        job: Job,
+        result: Result<Outcome, String>,
+        retry_after: Option<Duration>,
+    ) {
+        let session = match &result {
+            Ok(outcome) => outcome.session.clone(),
+            Err(_) => None,
+        };
         let done = WorkerDone {
             job,
-            result: Ok(Outcome {
-                message: String::new(),
-                session: session.map(Into::into),
-            }),
+            result,
             retry_after,
-            session: session.map(Into::into),
+            session,
         };
         self.daemon.handle(Event::Worker(done), self.now).unwrap();
     }
@@ -745,4 +763,71 @@ fn discard_unindexes_a_session_whose_jobs_have_all_finished() {
     // No job is left for it, but its closed conversation is in the index.
     assert_eq!(h.ok(Request::Discard), format!("discarded {id}"));
     assert!(search(&h.store, "budget").is_empty());
+}
+
+/// A session in the store with one summarized conversation, as the worker leaves it.
+fn summarized_session(store: &Store) -> String {
+    let start: jiff::Zoned = "2026-10-21T15:15:21+02:00[+02:00]".parse().unwrap();
+    let session = store.create_session(&start).unwrap();
+    let trigger = Trigger {
+        kind: TriggerKind::App,
+        app_name: Some("Element".into()),
+        binary: Some("element-desktop".into()),
+    };
+    let mut meta = Meta::new(session.id.clone(), start, trigger, "en".into());
+    meta.conversations
+        .push(kute::store::Conversation::new(1, 0, 420_000));
+    session.save_meta(&meta).unwrap();
+    std::fs::create_dir_all(session.summaries_dir()).unwrap();
+    std::fs::write(
+        session.conversation_summary_path(1),
+        "## Summary\n\n- A design problem.\n",
+    )
+    .unwrap();
+    session.id
+}
+
+#[test]
+fn a_new_summary_pops_up_a_notification_that_opens_it() {
+    let mut h = Harness::new();
+    let id = summarized_session(&h.store);
+    let outcome = Outcome {
+        session: Some(id.clone()),
+        summarized: vec![1],
+        ..Outcome::default()
+    };
+    h.finished(Job::Process { id: id.clone() }, Ok(outcome), None);
+    let notes = h.notes.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].title, "Summary ready: Element");
+    assert_eq!(notes[0].body, "15:15 to 15:22\nA design problem.");
+    assert_eq!(notes[0].open, h.store.session(&id).unwrap().summary_path());
+}
+
+#[test]
+fn jobs_without_new_summaries_stay_quiet() {
+    let mut h = Harness::new();
+    let id = summarized_session(&h.store);
+    // Done, but nothing summarized (e.g. a conversation under min_words).
+    h.done(Job::Process { id: id.clone() }, Some(&id), None);
+    // Failed.
+    h.finished(
+        Job::Process { id: id.clone() },
+        Err("GPU out of memory".into()),
+        None,
+    );
+    // Summarized, but the session is gone (discarded meanwhile).
+    let outcome = Outcome {
+        session: Some("2020-01-01T000000".into()),
+        summarized: vec![1],
+        ..Outcome::default()
+    };
+    h.finished(
+        Job::Process {
+            id: "2020-01-01T000000".into(),
+        },
+        Ok(outcome),
+        None,
+    );
+    assert!(h.notes.notes().is_empty(), "{:?}", h.notes.notes());
 }

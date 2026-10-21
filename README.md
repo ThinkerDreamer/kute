@@ -93,6 +93,9 @@ min_words = 80                    # shorter conversations aren't summarized
 # base_url = "http://localhost:11434/v1"   # openai backend (here: Ollama)
 # model = "qwen3:8b"
 # api_key_env = "OPENAI_API_KEY"
+
+[notify]
+open = ["xdg-open"]               # opens summary.md when you click "Summary ready"
 ```
 
 Data lives in `~/.local/share/kute` (change it with `[storage] dir = ...`). The folders are
