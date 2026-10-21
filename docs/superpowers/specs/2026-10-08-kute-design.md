@@ -182,7 +182,7 @@ stage = "pending"                       # pending | done | failed
 ### `transcript.md`
 
 ```
-# Coworking. 2026-10-08 09:03 (8 h 37 min, firefox)
+# Coworking. 2026-10-08 09:03 (8 h 37 min, Firefox)
 
 ## 09:40 to 09:54
 
@@ -250,7 +250,16 @@ later per-speaker labels on the others side (`Others (A)`).
   is already Recording or in Grace, `record` fails with "already recording <id>" (use
   `kute title` to name it); if one is Tentative, it is committed and turned manual. `kute stop`
   also ends an automatic session immediately. `kute discard` stops and deletes the
-  current session.
+  current session, and removes anything already indexed from it.
+- **After `stop` or `discard`:** the same call is not picked up again. Automatic detection
+  stays blocked until no mic stream has been seen for 2 s (snapshots, not ticks, count: time
+  without a graph never lifts the block). `kute record` still works.
+- **Sessions the daemon ends itself** (a capture died, the graph was lost) do not block: if
+  the call's mic is still open, a new session starts. The detector looks for a call on every
+  graph snapshot and on every tick (500 ms) while Idle, since the graph may have settled
+  before the session ended (seen when WirePlumber restarted mid-call). A capture that dies
+  within 5 s of starting does block, so a broken `pw-record` can't create an empty session
+  every tick.
 
 The detector is a pure function of (state, event, now) and is tested without PipeWire.
 
@@ -269,12 +278,16 @@ The detector is a pure function of (state, event, now) and is tested without Pip
   sample sets `started_at` (session `t = 0`); the other track's `offset_ms` is how much later
   its first sample arrived.
 - Capture uses PipeWire's own tools, not bindings: `pw-dump --monitor` streams graph changes
-  as JSON, and one `pw-record` process per track writes raw 16 kHz mono S16LE PCM to stdout.
+  as JSON, and one `pw-record --raw` process per track writes 16 kHz mono S16LE PCM to stdout
+  (without `--raw`, pw-record 1.6 writes a 24-byte AU header first).
   kute's capture streams are named `kute-me` and `kute-others` (`node.name`), and the
   detector ignores any stream whose `node.name` starts with `kute-`.
-- If a track delivers fewer samples than wall-clock time says it should (a device switch, an
-  xrun), the recorder pads the gap with silence once it exceeds 500 ms, so track time stays
-  aligned with the wall clock.
+- If the source itself stops delivering (a device switch, an xrun), the recorder pads the gap
+  with silence, so track time stays aligned with the wall clock. It pads only for time a
+  single read blocked beyond what it returned, by more than 500 ms, capped so the track never
+  runs ahead of the wall clock. A fast read draining a backlog never pads: comparing total
+  elapsed time with samples written can't tell a device stall from the recorder itself
+  falling behind (a slow VAD block), and padding then would shift the track for good.
 
 ### Conversation splitting (live)
 
@@ -342,6 +355,11 @@ the WAVs and set `state = "done"`.
 
 ### Summarization
 
+When the daemon writes summaries, a desktop notification "Summary ready: <title or app>"
+shows the conversation's time range and the summary's first line; clicking it opens the
+session's `summary.md` with `notify.open` (default `xdg-open`). Several summaries from one
+job make one notification.
+
 Input: the prompt template, then context (date, wall-clock range, trigger app, title,
 `user.name` as the speaker behind the Me label, target language), then the conversation's
 transcript section.
@@ -385,7 +403,8 @@ is persisted to `meta.toml`.
 | Transcription (e.g. GPU out of memory) | `stage = "failed"`, `error` set, retried with backoff (1, 5, 30 min), then left failed; notification after the last attempt |
 | Summarization | `stage = "failed"`, notification, no automatic retry; `kute summarize` re-runs |
 | Compression | `compression.stage = "failed"`, WAVs kept, notification; retried at next daemon start |
-| PipeWire disconnect | close the current session as if it ended; reconnect with backoff |
+| PipeWire disconnect | the graph counts as empty: an automatic session ends as if the call had ended (Tentative after 2 s, Recording after `stop_grace`) unless the graph comes back with the call's mic in time; a manual session continues. Reconnect with backoff (1, 2, 5, 10, then 30 s) |
+| A capture dies (`pw-record` exits) | end the session, keep what was written; a call still in progress starts a new session right away |
 | Disk full while recording | stop the session, keep what was written, notification |
 
 No failure path deletes audio, except `kute discard` and a Tentative session ending.
@@ -414,6 +433,9 @@ ignore_apps = []
 
 [capture]
 # mic = "USB"                  # substring of the device name
+
+[notify]
+open = ["xdg-open"]             # opens summary.md when a "Summary ready" notification is clicked
 
 [transcribe]
 model = "large-v3-turbo"

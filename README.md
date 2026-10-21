@@ -5,7 +5,7 @@ can summarize them. Your microphone and the other participants are recorded as s
 so the transcript knows who said what without guessing:
 
 ```
-# Planning. 2026-10-08 15:00 (42 min, firefox)
+# Planning. 2026-10-08 15:00 (42 min, Firefox)
 
 ## 15:00 to 15:42
 
@@ -13,13 +13,19 @@ so the transcript knows who said what without guessing:
 [15:00:15] Others: Sì, I left a couple of comments on the patch format.
 ```
 
-**Status: early.** The offline pipeline works: import two recordings, get a transcript, a
-summary per conversation, compressed audio and full-text search. Automatic call detection and
-recording (a background daemon watching PipeWire) is being built next. See
+**Status: early, in daily use by its author.** A background daemon notices when an app opens
+your microphone, records the call, and transcribes and summarizes each conversation as it
+ends. You can also import recordings made elsewhere. Next: a notification while recording, a
+tray icon, and `kute service install`. See
 [the design](docs/superpowers/specs/2026-10-08-kute-design.md) and [the to-do list](docs/TODO.md).
 
 ## How it works
 
+- **Calls are detected, not started by hand.** The daemon watches PipeWire. When an app
+  (Jitsi, Zoom, a browser) keeps the mic open for 20 s, it records; 15 s after the call ends,
+  it stops. A website checking your mic for a few seconds leaves nothing behind. A long
+  coworking call becomes one session, split into conversations wherever nobody spoke for
+  5 minutes, and each is transcribed and summarized as soon as it ends.
 - **Local transcription** with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) on your GPU
   (Vulkan by default, CUDA optional). Audio never leaves your machine unless you configure a
   remote summarizer.
@@ -35,7 +41,7 @@ recording (a background daemon watching PipeWire) is being built next. See
 
 ## Requirements
 
-- Linux
+- Linux with PipeWire (the daemon uses `pw-dump` and `pw-record`)
 - `ffmpeg` and `ffprobe`
 - Rust 1.88 or newer
 - For GPU transcription: Vulkan drivers and headers (`vulkan-headers`, `shaderc`), or CUDA with
@@ -51,7 +57,55 @@ kute model download        # large-v3-turbo (1.6 GB) and the Silero VAD model
 `kute model list` shows the other Whisper models; `kute model download small` fetches one.
 Downloads are checked against known SHA-256 sums.
 
-## Use
+## Record calls
+
+Run the daemon. In a terminal to try it out:
+
+```bash
+kute daemon
+```
+
+or as a systemd user service, so it starts when you log in (`kute service install` will
+write this for you; for now, save it as `~/.config/systemd/user/kute.service`):
+
+```ini
+[Unit]
+Description=kute: record, transcribe and summarize calls
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+ExecStart=%h/.cargo/bin/kute daemon
+Restart=on-failure
+RestartSec=5
+# include wherever your summarizer command lives (e.g. ~/.local/bin for claude)
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now kute
+journalctl --user -u kute -f    # what it's doing
+```
+
+Then just take calls. When a summary is ready, a notification shows its first line; click it
+to open `summary.md`. Control it with:
+
+```bash
+kute status                 # idle, recording, ...; the current session; the queue
+kute record "Standup"       # record now, until `kute stop`
+kute stop                   # end the current session now
+kute discard                # end it and delete it
+kute pause / kute resume    # stop listening for calls / start again
+```
+
+**Mute at the system level** (e.g. the Plasma microphone icon), not only in the call app.
+Many call apps keep the microphone open while muted, so kute still hears what you say;
+muting the system source silences kute too.
+
+## Import recordings
 
 Import two recordings, your microphone first, then everyone else:
 
@@ -68,6 +122,8 @@ Recordings in the `record-call` layout (`<prefix>-me.wav`, `<prefix>-others.wav`
 
 Other commands: `title`, `open`, `summarize` (again, optionally `--lang it`), `retranscribe`
 (e.g. with `--model`), `process` (finish anything that failed), `reindex`. See `kute --help`.
+While the daemon runs, these are queued on it and the result shows up in its log (and as a
+notification when a summary is written).
 
 ## Configure
 
@@ -80,6 +136,15 @@ name = "Alex"                     # who "Me" is, for summaries
 [labels]
 me = "Me"
 others = "Others"
+
+[detect]
+min_duration = "20s"              # how long the mic must stay open before recording counts
+stop_grace = "15s"                # how long after the call ends to keep recording
+conversation_gap = "5m"           # silence that splits a long session into conversations
+# ignore_apps = ["Firefox"]       # never treat these apps as calls (name or binary)
+
+[capture]
+# mic = "USB"                     # record this mic (substring of its name), not the default
 
 [transcribe]
 model = "large-v3-turbo"          # or a path to a ggml .bin file

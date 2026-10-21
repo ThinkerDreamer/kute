@@ -851,3 +851,53 @@ README: a "Running the daemon" section (`kute daemon`, the control commands, "mu
 git add README.md docs
 git commit -m "docs: running the daemon"
 ```
+
+---
+
+## Appendix: decisions made during execution
+
+Tasks 1-11 ran subagent-driven (2026-10-19 to 2026-10-21), each reviewed, then a
+whole-branch review and one fix wave. Where the plan above disagrees with the code, these
+decisions are why. The spec has been updated to match.
+
+**Plan text that changed**
+- `pw-record` needs `--raw` (1.6 otherwise writes a 24-byte AU header to stdout).
+- Gap fill (Task 7): pads only for time a single `read()` blocked beyond what it returned,
+  by more than 500 ms, capped at the wall clock. The plan's "elapsed vs written" rule padded
+  after the recorder itself fell behind, shifting the track for good.
+- `repair_wav_header` walks the RIFF chunks instead of assuming a 44-byte header; crash
+  tests build broken WAVs by zeroing the size fields of a finished file (`testing::crash_wav`).
+- A mic's source may be any `Audio/Source*` class (noise-suppression filters are
+  `Audio/Source/Virtual`).
+- `Capture` exposes a run-once `StopHandle`, and the last handle dropped stops the capture.
+- `LiveSession` owns its event channel; the daemon drains it on every tick (`pump`), so
+  `finish` can join the track threads and then drain without losing events.
+- `StartRequest` has no lifetime; `WorkerDone` carries the session id, so an `Import`'s
+  retry processes the imported session instead of importing again.
+- Snapshots carry the list of sources, so the daemon resolves `capture.mic` itself.
+
+**Behavior**
+- `kute process` refuses a recording session only in the foreground CLI; the worker
+  processes closed conversations of a live session by design. `kute summarize` works on a
+  recording session.
+- After the user's `stop` or `discard`, automatic detection is blocked until 2 s without a
+  mic in real snapshots (time without a graph doesn't count). Sessions the daemon ends
+  itself never block, except a capture that dies within 5 s of starting.
+- A PipeWire disconnect counts as an empty graph (the call ends normally unless it comes
+  back in time), not as a stop. An idle detector also looks for a call on every tick,
+  because a restart can leave the graph settled before the session ends (found in real use).
+- A capture that ends on its own ends the session (`failed()`); a Tentative one with no
+  audio is discarded.
+- Without live VAD (model missing, or lost mid-session), everything after the last closed
+  conversation becomes one conversation; crash recovery does the same for a session with no
+  conversations. The splitter extends an open conversation for late speech from a lagging
+  track (tracks lag by about one 10 s block, far below the gap).
+- `kute discard` also removes the session from the search index and drops its queued and
+  retrying jobs.
+- `recover` runs before startup jobs are listed, and the daemon binds the socket first, so
+  a second daemon fails before it can mark the first one's live session as interrupted.
+
+**Added after the plan**
+- Desktop notification when the daemon writes summaries, opening `summary.md` on click
+  (`[notify] open`).
+- `kute summarize/retranscribe/...` queued on the daemon say where the result is logged.
