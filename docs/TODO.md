@@ -91,10 +91,17 @@ Found in the final review of plan 3 and deferred.
   ran inside a session labeled "Element", because Element's video room had opened the mic first.
   Consider relabeling when the trigger app's mic closes and another app's stays open.
 
-## Packaging (AUR)
+## Packaging
 
-The name `kute` was free on the AUR as of 2026-10-08. Registration was closed that day, so this
-also waits on an account.
+Nix comes first: a `flake.nix` in this repo, then the same derivation upstreamed to nixpkgs
+(`pkgs/by-name/ku/kute/package.nix`). Whatever package ships kute must build with
+`GGML_NATIVE=OFF` (see the AUR notes below).
+
+### AUR (on hold)
+
+The name `kute` was free on the AUR as of 2026-10-08, but new-account registration has been
+closed since 2026-08-01 and probably won't reopen before Q1 or Q2 2027. These notes wait for
+that.
 
 - [ ] **Decide when to release 0.1.0.** Before the daemon, the AUR description has to promise only
   the offline pipeline (import, transcribe, summarize, search), since anyone installing `kute`
