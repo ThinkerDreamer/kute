@@ -4,7 +4,18 @@ use anyhow::{Result, bail};
 use jiff::{RoundMode, SignedDuration, Timestamp, Unit, Zoned, ZonedRound, civil, tz::TimeZone};
 
 pub fn now() -> Zoned {
-    truncate_ms(&Zoned::now())
+    truncate_ms(&Timestamp::now().to_zoned(system_tz()))
+}
+
+/// The system time zone, or UTC when there is none (no `/etc/localtime` or `TZ`, as in a
+/// container or the Nix build sandbox). jiff calls that zone `Etc/Unknown`, which it writes
+/// but cannot parse back, so a `meta.toml` saved with it could never be read.
+pub fn system_tz() -> TimeZone {
+    known_or_utc(TimeZone::system())
+}
+
+fn known_or_utc(tz: TimeZone) -> TimeZone {
+    if tz.is_unknown() { TimeZone::UTC } else { tz }
 }
 
 pub fn truncate_ms(z: &Zoned) -> Zoned {
@@ -25,10 +36,10 @@ pub fn parse_start(s: &str) -> Result<Zoned> {
         return Ok(truncate_ms(&z));
     }
     if let Ok(t) = s.parse::<Timestamp>() {
-        return Ok(truncate_ms(&t.to_zoned(TimeZone::system())));
+        return Ok(truncate_ms(&t.to_zoned(system_tz())));
     }
     if let Ok(dt) = s.parse::<civil::DateTime>() {
-        return Ok(truncate_ms(&dt.to_zoned(TimeZone::system())?));
+        return Ok(truncate_ms(&dt.to_zoned(system_tz())?));
     }
     bail!("cannot read {s:?} as a date and time (example: 2026-10-08T15:00:00)")
 }
@@ -60,6 +71,15 @@ pub fn session_id(z: &Zoned) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_system_zone_becomes_utc_so_times_read_back() {
+        let tz = known_or_utc(TimeZone::unknown());
+        let z = Timestamp::UNIX_EPOCH.to_zoned(tz);
+        assert_eq!(z.to_string().parse::<Zoned>().unwrap(), z);
+        let rome = TimeZone::get("Europe/Rome").unwrap();
+        assert_eq!(known_or_utc(rome.clone()), rome);
+    }
 
     #[test]
     fn parse_start_accepts_zoned_offset_and_naive_forms() {

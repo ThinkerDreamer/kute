@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::store::{Conversation, Meta, Session, SessionState, Store, Track, Trigger, TriggerKind};
 use crate::time;
 use anyhow::{Context, Result, bail};
-use jiff::{Timestamp, Zoned, tz::TimeZone};
+use jiff::{Timestamp, Zoned};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,7 +79,7 @@ pub fn resolve_start(req: &ImportRequest) -> Result<Zoned> {
         .and_then(|m| m.created())
         .with_context(|| format!("no start time for {}; pass --start", req.me.display()))?;
     Ok(time::truncate_ms(
-        &Timestamp::try_from(created)?.to_zoned(TimeZone::system()),
+        &Timestamp::try_from(created)?.to_zoned(time::system_tz()),
     ))
 }
 
