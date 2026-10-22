@@ -73,12 +73,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unknown_system_zone_becomes_utc_so_times_read_back() {
-        let tz = known_or_utc(TimeZone::unknown());
-        let z = Timestamp::UNIX_EPOCH.to_zoned(tz);
-        assert_eq!(z.to_string().parse::<Zoned>().unwrap(), z);
-        let rome = TimeZone::get("Europe/Rome").unwrap();
-        assert_eq!(known_or_utc(rome.clone()), rome);
+    fn an_unknown_system_zone_becomes_utc() {
+        assert_eq!(known_or_utc(TimeZone::unknown()), TimeZone::UTC);
+        let plus_two = TimeZone::fixed(jiff::tz::offset(2));
+        assert_eq!(known_or_utc(plus_two.clone()), plus_two);
     }
 
     #[test]
