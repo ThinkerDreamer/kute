@@ -90,6 +90,24 @@ Found in the final review of plan 3 and deferred.
 - [ ] **A session is labeled with the first app that opened the mic.** On 2026-10-21 a Zoom call
   ran inside a session labeled "Element", because Element's video room had opened the mic first.
   Consider relabeling when the trigger app's mic closes and another app's stays open.
+- [ ] **A closed conversation can be lost on a write error.** When `update_meta` fails (disk
+  full) for a `Closed` conversation, the splitter has already dropped it (`src/live.rs`), so it
+  never reaches `meta.toml`.
+- [ ] **A failed `finish` leaves the session `recording`.** On a write error (disk full) the meta
+  stays `recording` until the next daemon start, where recovery handles it. At least log it.
+- [ ] **Stop, then pause + disconnect + resume, can lift the restart block.** All three together
+  after `kute stop` let the stopped call be recorded again. Parked as an edge case.
+- [ ] **A Tentative session can enqueue processing and then be discarded.** Only when
+  `conversation_gap` is shorter than the 20 s commit time.
+- [ ] **Summarizer process-group leftovers.** The normal-exit path still waits on reader joins
+  if a grandchild keeps the pipes after the child exits (`src/summarize/command.rs`), and
+  `process_group(0)` means Ctrl-C in a foreground `kute summarize` doesn't reach the summarizer.
+- [ ] **IPC request handling.** A non-UTF-8 request gets no `Error` reply, and the read timeout
+  is per read, not per request (`src/ipc.rs`).
+- [ ] **Old indexes keep the binary name as the app label.** Indexes built before 45316c0 store
+  `electron` instead of the app name until `kute reindex`.
+- [ ] **Firefox mic check during a Firefox video.** The mic check binds the video's running
+  output, which keeps the session alive (spec open question).
 
 ## Packaging
 
