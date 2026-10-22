@@ -512,13 +512,25 @@ mod tests {
         let (c1, c2) = (&meta.conversations[0], &meta.conversations[1]);
         assert_eq!((c1.n, c1.start_ms, c1.end_ms), (1, 0, 5_000));
         assert_eq!(c2.n, 2);
-        assert!(c2.start_ms.abs_diff(58_000) <= 50, "{c2:?}");
-        assert!(c2.end_ms.abs_diff(64_000) <= 50, "{c2:?}");
+        // Others starts writing only after Me's first chunk is in, so its offset is however
+        // long that took (tens of ms on a loaded machine).
+        let others = meta.tracks.others.offset_ms;
+        assert!(
+            c2.start_ms.abs_diff(58_000 + others) <= 50,
+            "{c2:?}, offset {others}"
+        );
+        assert!(
+            c2.end_ms.abs_diff(64_000 + others) <= 50,
+            "{c2:?}, offset {others}"
+        );
         assert!(meta.conversations.iter().all(|c| c.stage == Stage::Pending));
         assert_eq!(meta.state, SessionState::Processing);
         assert_eq!(meta.open_conversation_ms, None);
         let duration = meta.duration_ms().unwrap();
-        assert!(duration.abs_diff(100_000) <= 50, "{duration}");
+        assert!(
+            duration.abs_diff(100_000 + others) <= 50,
+            "{duration}, offset {others}"
+        );
         assert_eq!(meta.title.as_deref(), Some("Planning"));
         assert_eq!(meta.trigger.kind, TriggerKind::Manual);
         assert_eq!(meta.tracks.me.device.as_deref(), Some("mic"));
