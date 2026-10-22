@@ -37,13 +37,23 @@ tray icon, and `kute service install`. See
 - **Summaries are optional and pluggable:** any command (e.g. `claude -p`), any OpenAI-compatible
   endpoint (Ollama, llama.cpp, vLLM, OpenRouter), or the Anthropic API.
 - **Plain files are the source of truth.** Each call is a folder with `transcript.md`,
-  `summary.md`, the audio as Opus, and `meta.toml`. The search index is rebuilt from them.
+  `summary.md`, the audio in the `opus` format, and `meta.toml`. The search index is rebuilt
+  from them.
+
+## Documentation
+
+- [Installing](docs/install.md): requirements, building with Vulkan, CUDA or CPU only, models,
+  running at login, updating and uninstalling
+- [Configuration](docs/configuration.md): every config key, and summarizer examples
+- [Privacy](docs/privacy.md): what leaves your machine, what's stored, how to delete it
+- [Troubleshooting](docs/troubleshooting.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Requirements
 
 - Linux with PipeWire (the daemon uses `pw-dump` and `pw-record`)
 - `ffmpeg` and `ffprobe`
-- Rust 1.88 or newer
+- Rust 1.88 or newer, `cmake` and `clang`
 - For GPU transcription: Vulkan drivers and headers (`vulkan-headers`, `shaderc`), or CUDA with
   `--no-default-features --features cuda`. Without either it runs on the CPU, more slowly.
 
@@ -53,6 +63,8 @@ tray icon, and `kute service install`. See
 cargo install --path .
 kute model download        # large-v3-turbo (1.6 GB) and the Silero VAD model
 ```
+
+Nix users: a flake is on its way. See [Installing](docs/install.md) for details.
 
 `kute model list` shows the other Whisper models; `kute model download small` fetches one.
 Downloads are checked against known SHA-256 sums.
@@ -66,7 +78,8 @@ kute daemon
 ```
 
 or as a systemd user service, so it starts when you log in (`kute service install` will
-write this for you; for now, save it as `~/.config/systemd/user/kute.service`):
+write this for you; for now, save it as `~/.config/systemd/user/kute.service`, and see
+[Installing](docs/install.md#running-the-daemon-at-login) for API keys):
 
 ```ini
 [Unit]
@@ -105,6 +118,10 @@ kute pause / kute resume    # stop listening for calls / start again
 Many call apps keep the microphone open while muted, so kute still hears what you say;
 muting the system source silences kute too.
 
+**Everything your computer plays is recorded**, not only the call: the "others" track is the
+whole system audio output, so a video or notification sound during a call ends up in the
+recording too.
+
 ## Import recordings
 
 Import two recordings, your microphone first, then everyone else:
@@ -127,7 +144,8 @@ notification when a summary is written).
 
 ## Configure
 
-`~/.config/kute/config.toml`. Every key is optional:
+`~/.config/kute/config.toml`. Every key is optional; [Configuration](docs/configuration.md)
+describes each one:
 
 ```toml
 [user]
@@ -164,7 +182,8 @@ open = ["xdg-open"]               # opens summary.md when you click "Summary rea
 ```
 
 Data lives in `~/.local/share/kute` (change it with `[storage] dir = ...`). The folders are
-readable only by you.
+readable only by you. [Privacy](docs/privacy.md) lists what's in them and what, if anything,
+leaves your machine.
 
 ## Consent and the law
 
