@@ -124,8 +124,9 @@ mode 0700, since it holds recordings of other people.
 - `meta.toml`, JSON, transcripts and summaries are written to a temp file in the same
   folder and renamed into place.
 - `transcript.md` and `summary.md` are derived and regenerated; they are not meant to be
-  hand-edited. `meta.toml`'s `title` is the one user-editable field (via `kute title`, or
-  by hand).
+  hand-edited. `meta.toml`'s `title` and `notes` are the user-editable fields (via
+  `kute title` and `kute notes`, or by hand). `notes` is free text that only the summarizer
+  reads.
 
 ### Time model
 

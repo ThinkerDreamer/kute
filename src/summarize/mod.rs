@@ -20,6 +20,7 @@ pub struct PromptContext<'a> {
     pub time_range: String,
     pub app: String,
     pub title: Option<&'a str>,
+    pub notes: Option<&'a str>,
     pub user_name: &'a str,
     pub me_label: &'a str,
     pub others_label: &'a str,
@@ -46,6 +47,11 @@ pub fn build_prompt(template: &str, ctx: &PromptContext, transcript: &str) -> St
         ctx.me_label, ctx.others_label
     ));
     p.push_str(&format!("- {}\n", language_instruction(ctx.language)));
+    if let Some(notes) = ctx.notes.map(str::trim).filter(|n| !n.is_empty()) {
+        p.push_str(&format!(
+            "\n## Notes from {who}\n\nFollow them: they can say who the speakers are, what to focus on, or how to write the notes (tone, level of detail).\n\n{notes}\n"
+        ));
+    }
     p.push_str("\n## Transcript\n\n");
     p.push_str(transcript.trim_end());
     p.push('\n');
@@ -150,6 +156,7 @@ mod tests {
             time_range: "09:40 to 09:54".into(),
             app: "firefox".into(),
             title: Some("Sync"),
+            notes: None,
             user_name: user,
             me_label: "Me",
             others_label: "Others",
@@ -167,6 +174,19 @@ mod tests {
         assert!(p.contains("\"Me\" is Alex. \"Others\" is everyone else on the call."));
         assert!(p.contains("Write the notes in Italian."));
         assert!(p.ends_with("## Transcript\n\n[09:40:11] Me: Ciao\n"));
+    }
+
+    #[test]
+    fn notes_go_between_context_and_transcript() {
+        let mut c = ctx("Alex", "en");
+        c.notes = Some("Jordan leads design.\nSam is on the backend.\n");
+        let p = build_prompt("Do notes.", &c, "x");
+        assert!(p.contains(
+            "- Write the notes in English.\n\n## Notes from Alex\n\nFollow them: they can say who the speakers are, what to focus on, or how to write the notes (tone, level of detail).\n\nJordan leads design.\nSam is on the backend.\n\n## Transcript\n"
+        ), "{p}");
+
+        c.notes = Some("  \n");
+        assert!(!build_prompt("Do notes.", &c, "x").contains("## Notes"));
     }
 
     #[test]

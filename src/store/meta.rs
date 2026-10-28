@@ -10,6 +10,9 @@ pub struct Meta {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Free text for the summarizer, e.g. who the other speakers are (`kute notes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     pub kute_version: String,
     pub started_at: Zoned,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +171,7 @@ impl Meta {
         Meta {
             id,
             title: None,
+            notes: None,
             kute_version: env!("CARGO_PKG_VERSION").to_string(),
             started_at,
             ended_at: None,

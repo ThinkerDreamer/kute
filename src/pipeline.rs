@@ -297,6 +297,7 @@ impl Pipeline<'_> {
             time_range: render::time_range(meta, &conv),
             app: meta.app_label(),
             title: meta.title.as_deref(),
+            notes: meta.notes.as_deref(),
             user_name: &self.config.user.name,
             me_label: &labels.me,
             others_label: &labels.others,

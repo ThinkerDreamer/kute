@@ -22,7 +22,8 @@ With the default config, nothing but the model downloads:
   - `openai`: the server at `base_url`. The default is a local Ollama.
   - `anthropic`: Anthropic's API.
 
-  The prompt also includes the date, the call app, the session title and your configured name.
+  The prompt also includes the date, the call app, the session title, the session's notes
+  (`kute notes`) and your configured name.
 
 kute has no telemetry, update checks or crash reporting.
 

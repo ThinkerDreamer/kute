@@ -40,6 +40,11 @@ pub enum Job {
         id: String,
         title: String,
     },
+    /// `None` removes the notes.
+    Notes {
+        id: String,
+        notes: Option<String>,
+    },
     Reindex,
 }
 
@@ -51,7 +56,8 @@ impl Job {
             Job::Process { id }
             | Job::Retranscribe { id, .. }
             | Job::Summarize { id, .. }
-            | Job::Title { id, .. } => Some(id),
+            | Job::Title { id, .. }
+            | Job::Notes { id, .. } => Some(id),
             Job::Import { .. } | Job::Reindex => None,
         }
     }
@@ -66,6 +72,7 @@ impl std::fmt::Display for Job {
             Job::Summarize { id, .. } => write!(f, "summarize {id}"),
             Job::Import { me, .. } => write!(f, "import {}", me.display()),
             Job::Title { id, .. } => write!(f, "title {id}"),
+            Job::Notes { id, .. } => write!(f, "notes {id}"),
             Job::Reindex => f.write_str("reindex"),
         }
     }
@@ -207,6 +214,12 @@ pub fn run(
             let meta = session.update_meta(|m| m.title = Some(title.clone()))?;
             pipeline::write_documents(&session, &meta, &config.labels)?;
             pipeline::index_session(&pipeline::open_index(store)?, &session)?;
+            Ok(outcome(Done::default(), &session))
+        }
+        Job::Notes { id, notes } => {
+            // Only the summarizer reads the notes, so there are no documents to rewrite.
+            let session = store.resolve(id)?;
+            session.update_meta(|m| m.notes = notes.clone())?;
             Ok(outcome(Done::default(), &session))
         }
         Job::Reindex => {
@@ -389,6 +402,29 @@ mod tests {
         };
         let outcome = run(&store, &config, &mut None, &job).unwrap();
         assert_eq!(outcome.summarized, vec![1]);
+    }
+
+    #[test]
+    fn a_notes_job_sets_and_clears_the_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let mut m = meta(Vec::new());
+        let session = store.create_session(&m.started_at).unwrap();
+        m.id = session.id.clone();
+        session.save_meta(&m).unwrap();
+        let notes = |notes: Option<&str>| {
+            let job = Job::Notes {
+                id: session.id.clone(),
+                notes: notes.map(Into::into),
+            };
+            run(&store, &Config::default(), &mut None, &job).unwrap();
+            session.load_meta().unwrap().notes
+        };
+        assert_eq!(
+            notes(Some("Jordan is the PM")).as_deref(),
+            Some("Jordan is the PM")
+        );
+        assert_eq!(notes(None), None);
     }
 
     fn failed(n: u32, step: Step, attempts: u32) -> Conversation {

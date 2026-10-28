@@ -137,6 +137,16 @@ kute list
 Recordings in the `record-call` layout (`<prefix>-me.wav`, `<prefix>-others.wav`,
 `<prefix>.start`) pick up their start time automatically.
 
+To steer a summary, give the session notes: who the other speakers are, what to focus on, the
+tone or level of detail you want. They work during a call too, and the next summary uses them:
+
+```bash
+kute notes last "Others: Jordan (PM, asks about dates), Sam (backend). Keep it short."
+kute notes last             # print them
+kute notes last --clear
+kute summarize last         # summarize again with them
+```
+
 Other commands: `title`, `open`, `summarize` (again, optionally `--lang it`), `retranscribe`
 (e.g. with `--model`), `process` (finish anything that failed), `reindex`. See `kute --help`.
 While the daemon runs, these are queued on it and the result shows up in its log (and as a

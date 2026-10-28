@@ -85,6 +85,14 @@ enum Command {
         #[arg(required = true)]
         title: Vec<String>,
     },
+    /// Set notes the summarizer reads, e.g. who the other speakers are (no text: print them)
+    Notes {
+        id: String,
+        text: Vec<String>,
+        /// Remove the notes
+        #[arg(long, conflicts_with = "text")]
+        clear: bool,
+    },
     /// Open a session's folder
     Open { id: String },
     /// Summarize again (all conversations, or one)
@@ -207,6 +215,23 @@ pub fn run() -> Result<()> {
                 title: title.join(" "),
             },
         )?,
+        Command::Notes { id, text, clear } => {
+            let session = store.resolve(&id)?;
+            if text.is_empty() && !clear {
+                if let Some(notes) = session.load_meta()?.notes {
+                    println!("{}", notes.trim_end());
+                }
+            } else {
+                run_job(
+                    &store,
+                    &config,
+                    &Job::Notes {
+                        id: session.id,
+                        notes: (!clear).then(|| text.join(" ")),
+                    },
+                )?;
+            }
+        }
         Command::Open { id } => {
             let session = store.resolve(&id)?;
             std::process::Command::new("xdg-open")

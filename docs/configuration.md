@@ -73,8 +73,8 @@ writes them to the session's `summary.md`.
 | `model` | see below | `openai` (required) and `anthropic` backends: the model name. |
 | `api_key_env` | see below | The name of the environment variable that holds the API key. Never put the key itself in the config. |
 
-kute appends a context block (date, time, app, title, who "Me" is, the language to write in) and
-the transcript to the prompt template, so a custom template only needs the instructions.
+kute appends a context block (date, time, app, title, who "Me" is, the language to write in), the
+session's notes if it has any (`kute notes`), and the transcript to the prompt template, so a custom template only needs the instructions.
 
 ### `command`: any program
 
