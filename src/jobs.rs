@@ -5,7 +5,7 @@ use crate::config::{Config, SummaryBackend};
 use crate::import::{self, ImportRequest};
 use crate::index::Index;
 use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
-use crate::store::{Meta, Session, Stage, Step, Store};
+use crate::store::{LanguageChange, Meta, Session, Stage, Step, Store};
 use crate::summarize;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,9 @@ pub enum Job {
     Retranscribe {
         id: String,
         model: Option<String>,
+        /// Applied to the session's languages first.
+        #[serde(default)]
+        languages: LanguageChange,
     },
     Summarize {
         id: String,
@@ -34,6 +37,8 @@ pub enum Job {
         others: PathBuf,
         start: Option<String>,
         title: Option<String>,
+        #[serde(default)]
+        languages: LanguageChange,
         process: bool,
     },
     Title {
@@ -44,6 +49,11 @@ pub enum Job {
     Notes {
         id: String,
         notes: Option<String>,
+    },
+    /// The languages spoken in a session.
+    Language {
+        id: String,
+        languages: LanguageChange,
     },
     Reindex,
 }
@@ -57,7 +67,8 @@ impl Job {
             | Job::Retranscribe { id, .. }
             | Job::Summarize { id, .. }
             | Job::Title { id, .. }
-            | Job::Notes { id, .. } => Some(id),
+            | Job::Notes { id, .. }
+            | Job::Language { id, .. } => Some(id),
             Job::Import { .. } | Job::Reindex => None,
         }
     }
@@ -73,6 +84,7 @@ impl std::fmt::Display for Job {
             Job::Import { me, .. } => write!(f, "import {}", me.display()),
             Job::Title { id, .. } => write!(f, "title {id}"),
             Job::Notes { id, .. } => write!(f, "notes {id}"),
+            Job::Language { id, .. } => write!(f, "language {id}"),
             Job::Reindex => f.write_str("reindex"),
         }
     }
@@ -125,8 +137,15 @@ pub fn run(
             let done = run_pipeline(store, config, &session, Some(provider), Work::Process)?;
             Ok(outcome(done, &session))
         }
-        Job::Retranscribe { id, model } => {
+        Job::Retranscribe {
+            id,
+            model,
+            languages,
+        } => {
             let session = store.resolve(id)?;
+            if !languages.is_empty() {
+                session.update_meta(|m| languages.apply(&mut m.transcribe))?;
+            }
             let done = match model {
                 Some(model) => {
                     // Another model for this job only, so it doesn't replace the kept provider.
@@ -176,6 +195,7 @@ pub fn run(
             others,
             start,
             title,
+            languages,
             process,
         } => {
             // Check the models first, so a missing model doesn't leave a half-done import.
@@ -192,6 +212,9 @@ pub fn run(
                     title: title.clone(),
                 },
             )?;
+            if !languages.is_empty() {
+                session.update_meta(|m| languages.apply(&mut m.transcribe))?;
+            }
             let mut done = Done {
                 message: format!("imported {}", session.id),
                 summarized: Vec::new(),
@@ -221,6 +244,31 @@ pub fn run(
             let session = store.resolve(id)?;
             session.update_meta(|m| m.notes = notes.clone())?;
             Ok(outcome(Done::default(), &session))
+        }
+        Job::Language { id, languages } => {
+            // Conversations transcribed from now on use them; earlier ones keep their text
+            // until they are transcribed again.
+            let session = store.resolve(id)?;
+            let meta = session.update_meta(|m| languages.apply(&mut m.transcribe))?;
+            let transcribed = meta
+                .conversations
+                .iter()
+                .filter(|c| !c.needs_transcription())
+                .count();
+            let message = if transcribed > 0 {
+                format!(
+                    "{transcribed} conversation(s) already transcribed; run `kute retranscribe {id}` to redo them"
+                )
+            } else {
+                String::new()
+            };
+            Ok(outcome(
+                Done {
+                    message,
+                    ..Done::default()
+                },
+                &session,
+            ))
         }
         Job::Reindex => {
             let n = pipeline::reindex_all(store, &Index::open(&store.index_path())?)?;
@@ -342,7 +390,7 @@ fn check_report(session: &Session, report: &Report) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Conversation, Meta, Stage, Step, Trigger, TriggerKind};
+    use crate::store::{Conversation, Meta, Stage, Step, Track, Trigger, TriggerKind};
 
     fn meta(conversations: Vec<Conversation>) -> Meta {
         let mut meta = Meta::new(
@@ -363,7 +411,7 @@ mod tests {
     fn a_summarize_job_reports_what_it_summarized() {
         // The daemon pops a notification for these, so they must come back in the Outcome.
         use crate::config::SummaryBackend;
-        use crate::store::{Segment, Track, TrackTranscript};
+        use crate::store::{Segment, TrackTranscript};
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("kute")).unwrap();
         let mut m = meta(vec![Conversation::new(1, 0, 5_000)]);
@@ -425,6 +473,49 @@ mod tests {
             Some("Jordan is the PM")
         );
         assert_eq!(notes(None), None);
+    }
+
+    #[test]
+    fn a_language_job_sets_the_languages_and_points_at_retranscribe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let mut done = Conversation::new(1, 0, 1_000);
+        done.stage = Stage::Summarized;
+        let mut m = meta(vec![done, Conversation::new(2, 2_000, 3_000)]);
+        let session = store.create_session(&m.started_at).unwrap();
+        m.id = session.id.clone();
+        session.save_meta(&m).unwrap();
+        let set = |languages: LanguageChange| {
+            let job = Job::Language {
+                id: session.id.clone(),
+                languages,
+            };
+            let outcome = run(&store, &Config::default(), &mut None, &job).unwrap();
+            (outcome, session.load_meta().unwrap().transcribe)
+        };
+        let codes = |c: &[&str]| Some(c.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+
+        let (_, t) = set(LanguageChange {
+            me: codes(&["ru"]),
+            others: codes(&["ru", "en"]),
+            ..Default::default()
+        });
+        assert_eq!(t.for_track(Track::Me), ["ru"]);
+        assert_eq!(t.for_track(Track::Others), ["ru", "en"]);
+        // Both tracks at once replaces the per-track languages.
+        let (outcome, t) = set(LanguageChange {
+            all: codes(&["it"]),
+            ..Default::default()
+        });
+        assert_eq!(t.for_track(Track::Me), ["it"]);
+        assert_eq!(t.for_track(Track::Others), ["it"]);
+        assert!(
+            outcome
+                .message
+                .starts_with("1 conversation(s) already transcribed"),
+            "{}",
+            outcome.message
+        );
     }
 
     fn failed(n: u32, step: Step, attempts: u32) -> Conversation {
@@ -489,6 +580,7 @@ mod tests {
             others: wav,
             start: Some("2026-10-08T15:00:00".into()),
             title: None,
+            languages: LanguageChange::default(),
             process: true,
         };
 

@@ -11,7 +11,7 @@ use crate::store::{
 };
 use crate::summarize::{PromptContext, Summarizer, build_prompt};
 use crate::transcribe::whisper::{SileroVad, WhisperTranscriber};
-use crate::transcribe::{SpeechDetector, Transcriber, transcribe_track};
+use crate::transcribe::{SpeechDetector, Transcriber, session_languages, transcribe_track};
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -202,10 +202,6 @@ impl Pipeline<'_> {
         n: u32,
     ) -> Result<()> {
         let conv = meta.conversation(n).expect("n comes from meta").clone();
-        let forced = match self.config.transcribe.language.as_str() {
-            "auto" => None,
-            lang => Some(lang.to_string()),
-        };
         let provider = self
             .asr
             .as_deref_mut()
@@ -229,18 +225,16 @@ impl Pipeline<'_> {
                     .saturating_sub(first),
                 None => 0,
             };
+            let languages = session_languages(
+                meta.transcribe.for_track(track),
+                &self.config.transcribe.language,
+            )?;
             let mut read = |a: u64, b: u64| match &source {
                 Some(s) => audio::read_wav_range(s.path(), first + a, first + b),
                 None => Ok(Vec::new()),
             };
             let result = transcribe_track(
-                &mut read,
-                total_ms,
-                base_ms,
-                n,
-                forced.as_deref(),
-                &mut *vad,
-                &mut *asr,
+                &mut read, total_ms, base_ms, n, &languages, &mut *vad, &mut *asr,
             )
             .with_context(|| format!("transcribing the {} track", track.as_str()))?;
             results.push((track, result));
@@ -567,7 +561,7 @@ mod tests {
         fn model_name(&self) -> &str {
             "fake"
         }
-        fn detect_language(&mut self, _: &[f32]) -> Result<String> {
+        fn detect_language(&mut self, _: &[f32], _: &[String]) -> Result<String> {
             Ok("en".into())
         }
         fn transcribe(&mut self, samples: &[f32], _: &str) -> Result<Vec<RawSegment>> {
@@ -695,6 +689,20 @@ mod tests {
             prompts: RefCell::new(Vec::new()),
             fail,
         }
+    }
+
+    #[test]
+    fn each_track_uses_its_own_languages() {
+        let f = fixture(2.0, 2.0, 2_000);
+        f.session
+            .update_meta(|m| m.transcribe.me = vec!["ru".into()])
+            .unwrap();
+        let mut asr = FakeProvider::new();
+        pipeline(&f, &mut asr, None).process(&f.session).unwrap();
+        let languages = &f.session.load_meta().unwrap().conversations[0].languages;
+        // "ru" is forced on the me track; the others track is detected ("en" from the fake).
+        assert_eq!(languages.me.as_deref(), Some("ru"));
+        assert_eq!(languages.others.as_deref(), Some("en"));
     }
 
     #[test]

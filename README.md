@@ -33,7 +33,8 @@ tray icon, and `kute service install`. See
   chunks are transcribed. That avoids Whisper's hallucinations on silence and keeps hours-long
   recordings fast.
 - **Mixed languages work.** The language is detected per speech chunk, so a call that switches
-  between English and Italian keeps both.
+  between English and Italian keeps both. Tell kute which languages a call uses and it only picks
+  among those.
 - **Summaries are optional and pluggable:** any command (e.g. `claude -p`), any OpenAI-compatible
   endpoint (Ollama, llama.cpp, vLLM, OpenRouter), or the Anthropic API.
 - **Plain files are the source of truth.** Each call is a folder with `transcript.md`,
@@ -147,6 +148,27 @@ kute notes last --clear
 kute summarize last         # summarize again with them
 ```
 
+When Whisper hears languages that aren't there (say, parts of a Russian lesson as another
+language), tell kute what is spoken. One language is forced; several limit detection to those.
+Set it at the start of a call, since each conversation is transcribed as soon as it ends:
+
+```bash
+kute language last ru          # only Russian
+kute language last ru en       # Russian or English, detected per chunk
+kute language last --me ru --others ru,en   # per track: a lesson where only the teacher
+                                            # switches to English
+kute language last             # print it
+kute language last auto        # detect any language, whatever the config says
+kute language last --clear     # back to the config's transcribe.language
+kute retranscribe last --lang ru,en   # set it and transcribe a past call again
+```
+
+Forcing a language works best when you know it. Whisper writes everything in the language it's
+given, so a chunk of Russian labelled English comes out translated or spelled in Latin letters,
+and an aside in another language comes out as Russian. `retranscribe` and `import` take `--lang`,
+`--me-lang` and `--others-lang`. To use the same languages for every call, set
+`transcribe.language` in the config.
+
 Other commands: `title`, `open`, `summarize` (again, optionally `--lang it`), `retranscribe`
 (e.g. with `--model`), `process` (finish anything that failed), `reindex`. See `kute --help`.
 While the daemon runs, these are queued on it and the result shows up in its log (and as a
@@ -176,7 +198,7 @@ conversation_gap = "5m"           # silence that splits a long session into conv
 
 [transcribe]
 model = "large-v3-turbo"          # or a path to a ggml .bin file
-language = "auto"                 # or force one, e.g. "it"
+language = "auto"                 # or force one, e.g. "it", or pick among some, e.g. "ru,en"
 
 [summary]
 backend = "command"               # none | command | openai | anthropic

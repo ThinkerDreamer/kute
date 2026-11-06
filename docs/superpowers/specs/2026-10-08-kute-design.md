@@ -124,9 +124,9 @@ mode 0700, since it holds recordings of other people.
 - `meta.toml`, JSON, transcripts and summaries are written to a temp file in the same
   folder and renamed into place.
 - `transcript.md` and `summary.md` are derived and regenerated; they are not meant to be
-  hand-edited. `meta.toml`'s `title` and `notes` are the user-editable fields (via
-  `kute title` and `kute notes`, or by hand). `notes` is free text that only the summarizer
-  reads.
+  hand-edited. `meta.toml`'s `title`, `notes` and `transcribe.languages` are the
+  user-editable fields (via `kute title`, `kute notes` and `kute language`, or by hand).
+  `notes` is free text that only the summarizer reads.
 
 ### Time model
 
@@ -160,6 +160,10 @@ offset_ms = 0
 [tracks.others]
 device = "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
 offset_ms = 37
+
+[transcribe]
+languages = ["ru", "en"]                # optional (`kute language`), or ["auto"]; absent: `transcribe.language`
+me = ["ru"]                             # optional, one track only; absent: `languages`
 
 [summary]
 language = "en"                         # resolved at session start; `--lang` overrides and persists
@@ -323,9 +327,11 @@ is rebuilt from sessions in `processing` state, in session order, then conversat
    2 s apart into chunks of at most 120 s, and runs Whisper with token timestamps on each
    chunk, so Whisper never sees long silences. (whisper.cpp's built-in VAD option is not
    used: it remaps segment times to the original audio but not token times, so word
-   timestamps would drift.) Language: `transcribe.language`, or with `auto`, detected per
-   chunk for chunks of at least 3 s; shorter chunks take the language of the nearest long
-   chunk, and if there is none, one detection runs on the first 30 s of speech. The track's
+   timestamps would drift.) Language: the session's `transcribe.me` / `transcribe.others`
+   for the track, else its `transcribe.languages`, else the config's `transcribe.language`. One language is forced. With several, or `auto`, it is
+   detected per chunk for chunks of at least 3 s, picking the most likely of the listed
+   languages (any language with `auto`); shorter chunks take the language of the nearest
+   long chunk, and if there is none, one detection runs on the first 30 s of speech. The track's
    language for the conversation is the one covering the most chunk time. Segment and word
    times are converted to session time and stored in `me.json` / `others.json` tagged with
    `conversation = n` (replacing any earlier entries for `n`). Audio is read in 10-minute
@@ -466,10 +472,12 @@ min_words = 80
 | `show <id> [--summary]` | print transcript or summary |
 | `search <query>` | FTS over transcripts and summaries; results show session, wall-clock time, speaker, line |
 | `title <id> <title>` | set the title |
+| `notes <id> [text] [--clear]` | set or print notes for the summarizer |
+| `language <id> [codes] [--me codes] [--others codes] [--clear]` | set or print the languages spoken, for both tracks or one (one forces it, several limit detection) |
 | `open <id>` | open the session folder |
 | `summarize <id> [...]` | (re)summarize |
-| `retranscribe <id> [--model m]` | transcribe again from the stored audio |
-| `import <me.wav> <others.wav> [--start time] [--title t] [--no-process]` | import external recordings; `--start` defaults to a sibling `.start` file (the `record-call` layout), then file birth time. Until the daemon's conversation splitting exists, an import is one conversation |
+| `retranscribe <id> [--model m] [--lang ru,en] [--me-lang ru] [--others-lang ru,en]` | transcribe again from the stored audio; the language options set the session's languages first |
+| `import <me.wav> <others.wav> [--start time] [--title t] [--lang codes] [--me-lang codes] [--others-lang codes] [--no-process]` | import external recordings; `--start` defaults to a sibling `.start` file (the `record-call` layout), then file birth time. Until the daemon's conversation splitting exists, an import is one conversation |
 | `process <id>` | finish whatever is outstanding for a session (transcription, summaries, compression), e.g. after a failure |
 | `reindex` | rebuild `index.sqlite` from the files |
 | `model download [name]` / `model list` | manage models |
@@ -482,8 +490,8 @@ min_words = 80
 ## 9. Index
 
 SQLite in WAL mode, with one writer at a time. While the daemon is running, every command
-that changes a session or the index (`title`, `summarize`, `retranscribe`, `import`,
-`reindex`) is sent to it and the worker performs the write; read-only commands open
+that changes a session or the index (`title`, `notes`, `language`, `summarize`,
+`retranscribe`, `import`, `reindex`) is sent to it and the worker performs the write; read-only commands open
 read-only connections. Without the daemon, the CLI writes directly.
 
 - `sessions(id, title, started_at, ended_at, app, conversation_count)`

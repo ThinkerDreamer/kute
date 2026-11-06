@@ -52,7 +52,8 @@ pub struct StorageConfig {
 pub struct TranscribeConfig {
     /// A model name from `kute model list`, or a path to a ggml `.bin` file.
     pub model: String,
-    /// `auto`, or a Whisper language code such as `it`.
+    /// `auto`, a Whisper language code such as `it` to force it, or several such as `ru,en`
+    /// to detect among them. A session's own languages (`kute language`) win.
     pub language: String,
     pub gpu: bool,
 }
@@ -184,7 +185,10 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config> {
-        Ok(toml::from_str(text)?)
+        let config: Config = toml::from_str(text)?;
+        crate::transcribe::parse_languages(&config.transcribe.language)
+            .context("transcribe.language")?;
+        Ok(config)
     }
 
     pub fn data_dir(&self) -> Result<PathBuf> {
@@ -259,6 +263,17 @@ mod tests {
         assert_eq!(c.summary.timeout, jiff::SignedDuration::from_secs(120));
         let home = dirs::home_dir().unwrap();
         assert_eq!(c.data_dir().unwrap(), home.join("Calls"));
+    }
+
+    #[test]
+    fn transcribe_language_takes_several_codes() {
+        let c = Config::parse("[transcribe]\nlanguage = \"ru,en\"").unwrap();
+        assert_eq!(c.transcribe.language, "ru,en");
+        let err = Config::parse("[transcribe]\nlanguage = \"xx\"").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("transcribe.language"),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -8,10 +8,11 @@ use crate::jobs::{self, ConversationsFailed, Job};
 use crate::models;
 use crate::pipeline;
 use crate::render;
-use crate::store::{SessionState, Store, Track};
+use crate::store::{LanguageChange, SessionState, Store, Track};
 use crate::time;
+use crate::transcribe::parse_languages;
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -54,6 +55,8 @@ enum Command {
         start: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        #[command(flatten)]
+        lang: LangArgs,
         /// Only import; run `kute process` later
         #[arg(long)]
         no_process: bool,
@@ -93,6 +96,22 @@ enum Command {
         #[arg(long, conflicts_with = "text")]
         clear: bool,
     },
+    /// Set the languages spoken in a session, e.g. ru, ru en to pick between them, or auto
+    /// (nothing: print them)
+    Language {
+        id: String,
+        /// Both tracks; replaces --me and --others set earlier
+        codes: Vec<String>,
+        /// Only your microphone's track, e.g. ru
+        #[arg(long, value_name = "CODES")]
+        me: Option<String>,
+        /// Only the others' track, e.g. ru,en
+        #[arg(long, value_name = "CODES")]
+        others: Option<String>,
+        /// Use `transcribe.language` from the config again
+        #[arg(long, conflicts_with_all = ["codes", "me", "others"])]
+        clear: bool,
+    },
     /// Open a session's folder
     Open { id: String },
     /// Summarize again (all conversations, or one)
@@ -111,6 +130,8 @@ enum Command {
         id: String,
         #[arg(long)]
         model: Option<String>,
+        #[command(flatten)]
+        lang: LangArgs,
     },
     /// Rebuild the search index from the session folders
     Reindex,
@@ -119,6 +140,43 @@ enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+}
+
+/// Languages for `retranscribe` and `import`, saved in meta.toml (see `kute language`).
+#[derive(Args)]
+struct LangArgs {
+    /// Languages spoken, e.g. ru or ru,en; auto to detect any
+    #[arg(long, value_name = "CODES")]
+    lang: Option<String>,
+    /// Languages on your microphone's track only
+    #[arg(long, value_name = "CODES")]
+    me_lang: Option<String>,
+    /// Languages on the others' track only
+    #[arg(long, value_name = "CODES")]
+    others_lang: Option<String>,
+}
+
+impl LangArgs {
+    fn change(&self) -> Result<LanguageChange> {
+        language_change(
+            self.lang.as_deref(),
+            self.me_lang.as_deref(),
+            self.others_lang.as_deref(),
+        )
+    }
+}
+
+fn language_change(
+    all: Option<&str>,
+    me: Option<&str>,
+    others: Option<&str>,
+) -> Result<LanguageChange> {
+    let parse = |codes: Option<&str>| codes.map(parse_languages).transpose();
+    Ok(LanguageChange {
+        all: parse(all)?,
+        me: parse(me)?,
+        others: parse(others)?,
+    })
 }
 
 #[derive(Subcommand)]
@@ -167,6 +225,7 @@ pub fn run() -> Result<()> {
             others,
             start,
             title,
+            lang,
             no_process,
         } => run_job(
             &store,
@@ -177,6 +236,7 @@ pub fn run() -> Result<()> {
                 others: std::path::absolute(&others)?,
                 start,
                 title,
+                languages: lang.change()?,
                 process: !no_process,
             },
         )?,
@@ -232,6 +292,46 @@ pub fn run() -> Result<()> {
                 )?;
             }
         }
+        Command::Language {
+            id,
+            codes,
+            me,
+            others,
+            clear,
+        } => {
+            let session = store.resolve(&id)?;
+            let languages = if clear {
+                LanguageChange {
+                    all: Some(Vec::new()),
+                    ..LanguageChange::default()
+                }
+            } else {
+                let all = (!codes.is_empty()).then(|| codes.join(","));
+                language_change(all.as_deref(), me.as_deref(), others.as_deref())?
+            };
+            if languages.is_empty() {
+                let transcribe = session.load_meta()?.transcribe;
+                for track in Track::BOTH {
+                    match transcribe.for_track(track) {
+                        [] => println!(
+                            "{}: {} (from the config)",
+                            track.as_str(),
+                            config.transcribe.language
+                        ),
+                        codes => println!("{}: {}", track.as_str(), codes.join(",")),
+                    }
+                }
+            } else {
+                run_job(
+                    &store,
+                    &config,
+                    &Job::Language {
+                        id: session.id,
+                        languages,
+                    },
+                )?;
+            }
+        }
         Command::Open { id } => {
             let session = store.resolve(&id)?;
             std::process::Command::new("xdg-open")
@@ -254,12 +354,13 @@ pub fn run() -> Result<()> {
                 backend: backend.map(Into::into),
             },
         )?,
-        Command::Retranscribe { id, model } => run_job(
+        Command::Retranscribe { id, model, lang } => run_job(
             &store,
             &config,
             &Job::Retranscribe {
                 id: store.resolve(&id)?.id,
                 model,
+                languages: lang.change()?,
             },
         )?,
         Command::Reindex => run_job(&store, &config, &Job::Reindex)?,

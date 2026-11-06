@@ -76,7 +76,7 @@ impl Transcriber for WhisperTranscriber {
         &self.name
     }
 
-    fn detect_language(&mut self, samples: &[f32]) -> Result<String> {
+    fn detect_language(&mut self, samples: &[f32], candidates: &[String]) -> Result<String> {
         let mut state = self
             .ctx
             .create_state()
@@ -84,9 +84,10 @@ impl Transcriber for WhisperTranscriber {
         state
             .pcm_to_mel(samples, self.threads)
             .map_err(|e| anyhow!("computing mel spectrogram: {e}"))?;
-        let (id, _) = state
+        let (best, probs) = state
             .lang_detect(0, self.threads)
             .map_err(|e| anyhow!("detecting language: {e}"))?;
+        let id = most_likely(best, &probs, candidates)?;
         match whisper_rs::get_lang_str(id) {
             Some(lang) => Ok(lang.to_string()),
             None => bail!("Whisper returned unknown language id {id}"),
@@ -141,6 +142,30 @@ impl Transcriber for WhisperTranscriber {
         }
         Ok(out)
     }
+}
+
+/// Whisper's code for a language given by code or English name, e.g. `ru` for `ru` or
+/// `russian`; `None` when Whisper doesn't know it.
+pub fn language_code(name: &str) -> Option<&'static str> {
+    whisper_rs::get_lang_id(name).and_then(whisper_rs::get_lang_str)
+}
+
+/// The most likely of `candidates` by Whisper's per-language probabilities `probs`, or
+/// `best` (Whisper's own pick) when there are no candidates.
+fn most_likely(best: i32, probs: &[f32], candidates: &[String]) -> Result<i32> {
+    if candidates.is_empty() {
+        return Ok(best);
+    }
+    let mut pick: Option<(i32, f32)> = None;
+    for code in candidates {
+        let id = whisper_rs::get_lang_id(code)
+            .with_context(|| format!("Whisper doesn't know the language {code:?}"))?;
+        let p = probs.get(id as usize).copied().unwrap_or(0.0);
+        if pick.is_none_or(|(_, best_p)| p > best_p) {
+            pick = Some((id, p));
+        }
+    }
+    Ok(pick.expect("candidates is not empty").0)
 }
 
 /// One Whisper token: raw bytes (possibly part of a UTF-8 character) and its times in
@@ -250,6 +275,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn most_likely_picks_among_the_candidates() {
+        let id = |code| whisper_rs::get_lang_id(code).unwrap();
+        let mut probs = vec![0.0; whisper_rs::get_lang_max_id() as usize + 1];
+        probs[id("uk") as usize] = 0.5;
+        probs[id("ru") as usize] = 0.3;
+        probs[id("en") as usize] = 0.1;
+        let langs = |codes: &[&str]| codes.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(most_likely(id("uk"), &probs, &[]).unwrap(), id("uk"));
+        assert_eq!(
+            most_likely(id("uk"), &probs, &langs(&["en", "ru"])).unwrap(),
+            id("ru")
+        );
+        assert!(most_likely(id("uk"), &probs, &langs(&["xx"])).is_err());
+    }
+
     /// Needs KUTE_TEST_MODELS with ggml-tiny.bin and ggml-silero-v6.2.0.bin.
     #[test]
     #[ignore]
@@ -265,7 +306,9 @@ mod tests {
         assert!(!regions.is_empty());
         assert!(regions[0].start_ms < 1_000, "{regions:?}");
         let mut asr = WhisperTranscriber::load(&dir.join("ggml-tiny.bin"), "tiny", false).unwrap();
-        assert_eq!(asr.detect_language(&samples).unwrap(), "en");
+        assert_eq!(asr.detect_language(&samples, &[]).unwrap(), "en");
+        let among = ["it".to_string(), "en".to_string()];
+        assert_eq!(asr.detect_language(&samples, &among).unwrap(), "en");
         let text: String = asr
             .transcribe(&samples, "en")
             .unwrap()

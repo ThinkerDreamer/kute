@@ -236,6 +236,10 @@ mod tests {
             job: Job::Retranscribe {
                 id: "s1".into(),
                 model: None,
+                languages: crate::store::LanguageChange {
+                    me: Some(vec!["ru".into()]),
+                    ..Default::default()
+                },
             },
         };
         let Some(Response::Ok { message }) = request(&path, &req).unwrap() else {

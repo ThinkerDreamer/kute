@@ -5,7 +5,7 @@ pub mod whisper;
 
 use crate::audio::ms_to_samples;
 use crate::store::{Segment, Word};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
 pub const CHUNK_JOIN_GAP_MS: u64 = 2_000;
@@ -41,8 +41,50 @@ pub trait SpeechDetector {
 
 pub trait Transcriber {
     fn model_name(&self) -> &str;
-    fn detect_language(&mut self, samples: &[f32]) -> Result<String>;
+    /// The language spoken in `samples`. With `candidates`, one of them; empty means any
+    /// language the engine knows.
+    fn detect_language(&mut self, samples: &[f32], candidates: &[String]) -> Result<String>;
     fn transcribe(&mut self, samples: &[f32], language: &str) -> Result<Vec<RawSegment>>;
+}
+
+/// The language setting that means "detect any language".
+pub const ANY_LANGUAGE: &str = "auto";
+
+/// Parses a language setting: `auto` for any language, one code such as `ru` to force it, or
+/// several such as `ru,en` to detect among them. English names such as `russian` work too;
+/// the result is Whisper's codes, `["auto"]`, or empty for no setting at all.
+pub fn parse_languages(text: &str) -> Result<Vec<String>> {
+    let mut languages: Vec<String> = Vec::new();
+    for code in text.split([',', ' ']).filter(|c| !c.is_empty()) {
+        let code = code.to_lowercase();
+        if code == ANY_LANGUAGE {
+            if !languages.contains(&code) {
+                languages.push(code);
+            }
+            continue;
+        }
+        let Some(code) = whisper::language_code(&code) else {
+            bail!("unknown language {code:?}; use codes such as en, it or ru");
+        };
+        if !languages.iter().any(|l| l == code) {
+            languages.push(code.to_string());
+        }
+    }
+    if languages.len() > 1 && languages.iter().any(|l| l == ANY_LANGUAGE) {
+        bail!("{ANY_LANGUAGE} can't be combined with languages");
+    }
+    Ok(languages)
+}
+
+/// The languages to transcribe a track in, for `transcribe_track`: the session's setting for
+/// the track, else the config's; empty for any language.
+pub fn session_languages(session: &[String], config: &str) -> Result<Vec<String>> {
+    let setting = if session.is_empty() {
+        parse_languages(config)?
+    } else {
+        session.to_vec()
+    };
+    Ok(setting.into_iter().filter(|l| l != ANY_LANGUAGE).collect())
 }
 
 /// Pads speech regions, joins close ones, and caps chunk length. Chunks never overlap.
@@ -95,14 +137,15 @@ pub const MIN_TAIL_MS: u64 = 60_000;
 
 /// Transcribes one track's audio for one conversation. `read` returns audio by time
 /// relative to the start of that audio, `total_ms` is its length, and `base_ms` is the
-/// session time of its start; returned segments are in session time. Memory use is
-/// bounded by one VAD window plus one chunk.
+/// session time of its start; returned segments are in session time. `languages` limits
+/// what is spoken: one forces it, several are detected among, none detects any. Memory use
+/// is bounded by one VAD window plus one chunk.
 pub fn transcribe_track(
     read: &mut ReadAudio,
     total_ms: u64,
     base_ms: u64,
     conversation: u32,
-    forced_language: Option<&str>,
+    languages: &[String],
     vad: &mut dyn SpeechDetector,
     asr: &mut dyn Transcriber,
 ) -> Result<TrackResult> {
@@ -119,7 +162,7 @@ pub fn transcribe_track(
     // A region cut by a window edge comes back as two touching regions; plan_chunks
     // joins them again.
     let chunks = plan_chunks(&regions, total_ms);
-    let languages = assign_languages(&chunks, read, forced_language, asr)?;
+    let languages = assign_languages(&chunks, read, languages, asr)?;
 
     let mut segments = Vec::new();
     let mut coverage: BTreeMap<String, u64> = BTreeMap::new();
@@ -175,16 +218,16 @@ fn vad_windows(total_ms: u64) -> Vec<Span> {
 fn assign_languages(
     chunks: &[Span],
     read: &mut ReadAudio,
-    forced: Option<&str>,
+    candidates: &[String],
     asr: &mut dyn Transcriber,
 ) -> Result<Vec<String>> {
-    if let Some(lang) = forced {
-        return Ok(vec![lang.to_string(); chunks.len()]);
+    if let [lang] = candidates {
+        return Ok(vec![lang.clone(); chunks.len()]);
     }
     let mut detected: Vec<Option<String>> = vec![None; chunks.len()];
     for (i, c) in chunks.iter().enumerate() {
         if c.len_ms() >= MIN_DETECT_MS {
-            detected[i] = Some(asr.detect_language(&read(c.start_ms, c.end_ms)?)?);
+            detected[i] = Some(asr.detect_language(&read(c.start_ms, c.end_ms)?, candidates)?);
         }
     }
     let known: Vec<(usize, String)> = detected
@@ -203,7 +246,7 @@ fn assign_languages(
                 break;
             }
         }
-        let lang = asr.detect_language(&joined)?;
+        let lang = asr.detect_language(&joined, candidates)?;
         return Ok(vec![lang; chunks.len()]);
     }
     Ok((0..chunks.len())
@@ -239,14 +282,16 @@ mod tests {
     struct FakeAsr {
         detect: VecDeque<String>,
         detect_calls: Vec<usize>,
+        candidates: Vec<Vec<String>>,
         calls: Vec<(usize, String)>,
     }
     impl Transcriber for FakeAsr {
         fn model_name(&self) -> &str {
             "fake"
         }
-        fn detect_language(&mut self, samples: &[f32]) -> Result<String> {
+        fn detect_language(&mut self, samples: &[f32], candidates: &[String]) -> Result<String> {
             self.detect_calls.push(samples.len());
+            self.candidates.push(candidates.to_vec());
             Ok(self.detect.pop_front().unwrap_or_else(|| "en".into()))
         }
         fn transcribe(&mut self, samples: &[f32], language: &str) -> Result<Vec<RawSegment>> {
@@ -279,7 +324,7 @@ mod tests {
         samples: &[f32],
         base_ms: u64,
         n: u32,
-        forced: Option<&str>,
+        languages: &[&str],
         vad: &mut dyn SpeechDetector,
         asr: &mut FakeAsr,
     ) -> Result<TrackResult> {
@@ -294,7 +339,8 @@ mod tests {
             )
             .to_vec())
         };
-        transcribe_track(&mut read, total_ms, base_ms, n, forced, vad, asr)
+        let languages: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+        transcribe_track(&mut read, total_ms, base_ms, n, &languages, vad, asr)
     }
 
     /// Reports runs of non-zero samples as speech, like a real detector would.
@@ -352,7 +398,7 @@ mod tests {
             total_ms,
             0,
             1,
-            Some("en"),
+            &["en".to_string()],
             &mut LevelVad,
             &mut asr,
         )
@@ -365,6 +411,34 @@ mod tests {
         assert_eq!(asr.calls.len(), 2);
         assert_eq!(asr.calls[0].0, ms_to_samples(2_000 + 2 * CHUNK_PAD_MS));
         assert_eq!(r.segments[0].start_ms, 599_000 - CHUNK_PAD_MS + 100);
+    }
+
+    #[test]
+    fn parses_language_settings() {
+        let parse = |s| parse_languages(s).unwrap();
+        assert_eq!(parse("auto"), vec!["auto"]);
+        assert!(parse("").is_empty());
+        assert!(parse_languages("ru,auto").is_err());
+        assert_eq!(parse("ru"), vec!["ru"]);
+        assert_eq!(parse("RU, en,russian"), vec!["ru", "en"]);
+        assert!(parse_languages("ru,xx").is_err());
+    }
+
+    #[test]
+    fn session_languages_win_over_the_config() {
+        let langs = |codes: &[&str]| codes.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(session_languages(&[], "ru,en").unwrap(), vec!["ru", "en"]);
+        assert!(session_languages(&[], "auto").unwrap().is_empty());
+        assert_eq!(
+            session_languages(&langs(&["it"]), "ru").unwrap(),
+            vec!["it"]
+        );
+        // An explicit "auto" on the session overrides a forced language in the config.
+        assert!(
+            session_languages(&langs(&["auto"]), "ru")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -403,7 +477,7 @@ mod tests {
     #[test]
     fn no_speech_means_no_calls() {
         let mut asr = FakeAsr::default();
-        let r = run(&silence(10_000), 0, 1, None, &mut FakeVad(vec![]), &mut asr).unwrap();
+        let r = run(&silence(10_000), 0, 1, &[], &mut FakeVad(vec![]), &mut asr).unwrap();
         assert_eq!(r.language, None);
         assert!(r.segments.is_empty());
         assert!(asr.calls.is_empty() && asr.detect_calls.is_empty());
@@ -416,7 +490,7 @@ mod tests {
             &silence(20_000),
             60_000,
             3,
-            None,
+            &[],
             &mut FakeVad(vec![span(1_000, 5_000)]),
             &mut asr,
         )
@@ -436,7 +510,7 @@ mod tests {
             &silence(10_000),
             0,
             1,
-            Some("it"),
+            &["it"],
             &mut FakeVad(vec![span(0, 4_000)]),
             &mut asr,
         )
@@ -452,7 +526,7 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 5_000), span(10_000, 11_000)]);
-        run(&silence(20_000), 0, 1, None, vad, &mut asr).unwrap();
+        run(&silence(20_000), 0, 1, &[], vad, &mut asr).unwrap();
         assert_eq!(asr.detect_calls.len(), 1);
         assert_eq!(
             asr.calls.iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
@@ -467,7 +541,7 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 1_000), span(5_000, 6_000)]);
-        let r = run(&silence(10_000), 0, 1, None, vad, &mut asr).unwrap();
+        let r = run(&silence(10_000), 0, 1, &[], vad, &mut asr).unwrap();
         assert_eq!(asr.detect_calls.len(), 1);
         // [0, 1_200] (padding clamped at 0) + [4_800, 6_200]
         assert_eq!(
@@ -484,11 +558,37 @@ mod tests {
             ..Default::default()
         };
         let vad = &mut FakeVad(vec![span(0, 6_000), span(20_000, 24_000)]);
-        let r = run(&silence(30_000), 0, 1, None, vad, &mut asr).unwrap();
+        let r = run(&silence(30_000), 0, 1, &[], vad, &mut asr).unwrap();
         assert_eq!(r.language.as_deref(), Some("en"));
         assert_eq!(
             asr.calls.iter().map(|c| c.1.as_str()).collect::<Vec<_>>(),
             vec!["en", "it"]
+        );
+    }
+
+    #[test]
+    fn several_languages_are_detected_among() {
+        let mut asr = FakeAsr {
+            detect: VecDeque::from(vec!["ru".to_string()]),
+            ..Default::default()
+        };
+        let vad = &mut FakeVad(vec![span(0, 5_000), span(10_000, 11_000)]);
+        let r = run(&silence(20_000), 0, 1, &["ru", "en"], vad, &mut asr).unwrap();
+        assert_eq!(
+            asr.candidates,
+            vec![vec!["ru".to_string(), "en".to_string()]]
+        );
+        assert_eq!(r.language.as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn all_short_chunks_detect_among_the_languages_too() {
+        let mut asr = FakeAsr::default();
+        let vad = &mut FakeVad(vec![span(0, 1_000)]);
+        run(&silence(10_000), 0, 1, &["ru", "en"], vad, &mut asr).unwrap();
+        assert_eq!(
+            asr.candidates,
+            vec![vec!["ru".to_string(), "en".to_string()]]
         );
     }
 }

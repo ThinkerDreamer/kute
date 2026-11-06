@@ -23,6 +23,8 @@ pub struct Meta {
     pub trigger: Trigger,
     #[serde(default)]
     pub tracks: Tracks,
+    #[serde(default, skip_serializing_if = "TranscribeMeta::is_empty")]
+    pub transcribe: TranscribeMeta,
     pub summary: SummaryMeta,
     #[serde(default)]
     pub conversations: Vec<Conversation>,
@@ -89,6 +91,67 @@ pub struct TrackMeta {
     /// How much later than session time 0 this track's first sample arrived.
     #[serde(default)]
     pub offset_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TranscribeMeta {
+    /// The languages spoken in this session (`kute language`): one is forced, several are
+    /// detected among, `["auto"]` detects any. Empty: `transcribe.language` from the config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    /// The same for one track, in place of `languages`; empty: `languages`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub me: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<String>,
+}
+
+impl TranscribeMeta {
+    fn is_empty(&self) -> bool {
+        self.languages.is_empty() && self.me.is_empty() && self.others.is_empty()
+    }
+
+    /// The session's languages for `track`; empty when the session sets none.
+    pub fn for_track(&self, track: Track) -> &[String] {
+        let own = match track {
+            Track::Me => &self.me,
+            Track::Others => &self.others,
+        };
+        if own.is_empty() { &self.languages } else { own }
+    }
+}
+
+/// A change to a session's languages (`kute language`, `--lang`). `Some(empty)` removes a
+/// setting.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LanguageChange {
+    /// Both tracks; replaces any per-track languages too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub me: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub others: Option<Vec<String>>,
+}
+
+impl LanguageChange {
+    pub fn is_empty(&self) -> bool {
+        self.all.is_none() && self.me.is_none() && self.others.is_none()
+    }
+
+    pub fn apply(&self, t: &mut TranscribeMeta) {
+        if let Some(all) = &self.all {
+            t.languages = all.clone();
+            t.me.clear();
+            t.others.clear();
+        }
+        if let Some(me) = &self.me {
+            t.me = me.clone();
+        }
+        if let Some(others) = &self.others {
+            t.others = others.clone();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +242,7 @@ impl Meta {
             interrupted: false,
             trigger,
             tracks: Tracks::default(),
+            transcribe: TranscribeMeta::default(),
             summary: SummaryMeta {
                 language: summary_language,
             },

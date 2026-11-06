@@ -379,6 +379,7 @@ fn a_failed_transcription_is_retried_after_the_backoff() {
         others: "/tmp/others.wav".into(),
         start: None,
         title: None,
+        languages: Default::default(),
         process: true,
     };
     h.ok(Request::Job {
