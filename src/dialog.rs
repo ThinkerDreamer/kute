@@ -45,7 +45,7 @@ impl Dialogs {
                 std::env::split_paths(path)
                     .filter(|dir| dir.is_absolute())
                     .map(|dir| dir.join(name))
-                    .find(|p| p.is_file())
+                    .find(|p| is_executable(p))
                     .map(|program| Dialogs { kind, program })
             })
     }
@@ -142,6 +142,12 @@ impl Dialogs {
     }
 }
 
+/// A file someone may run: a `kdialog` without the execute bit must not hide a zenity.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
 /// The dialogs end what they print with one newline; the text's own stay.
 fn strip_final_newline(text: &str) -> &str {
     text.strip_suffix('\n').unwrap_or(text)
@@ -176,6 +182,11 @@ mod tests {
         script(dir.path(), "kdialog", "");
         let d = Dialogs::find_in(dir.path().as_os_str()).unwrap();
         assert_eq!(d.kind, Kind::Kdialog);
+        // Not runnable: skipped.
+        let kdialog = dir.path().join("kdialog");
+        std::fs::set_permissions(&kdialog, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let d = Dialogs::find_in(dir.path().as_os_str()).unwrap();
+        assert_eq!(d.kind, Kind::Zenity);
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(Dialogs::find_in(empty.path().as_os_str()), None);
     }
