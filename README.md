@@ -1,6 +1,6 @@
 # kute
 
-*kute* is Toki Pona for "listen". kute transcribes your calls on a Linux desktop, locally, and
+*kute* is [Toki Pona](https://awensona.sunonena.eu/?utm_source=kute) for "listen". kute transcribes your calls on a Linux desktop, locally, and
 can summarize them. Your microphone and the other participants are recorded as separate tracks,
 so the transcript knows who said what without guessing:
 
