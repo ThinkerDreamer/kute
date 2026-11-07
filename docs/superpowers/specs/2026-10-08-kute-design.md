@@ -96,7 +96,7 @@ summarization never share the GPU at the same time (consumer GPUs with 8 GB of V
 | `store` | Session folders, `meta.toml`, atomic writes |
 | `index` | SQLite FTS5 index, derived from the files |
 | `ipc` | Socket protocol (server and client) |
-| `tray` | StatusNotifierItem tray icon (`ksni`) and notifications (`notify-rust`) |
+| `tray` | StatusNotifierItem tray icon (`ksni`); notifications are `notify` (`notify-rust`) |
 | `config` | Config loading and defaults |
 | `cli` | Subcommands (`clap`) |
 
@@ -483,7 +483,8 @@ min_words = 80
 | `model download [name]` / `model list` | manage models |
 | `doctor` | check PipeWire, ffmpeg/ffprobe, GPU backend, models, summarizer reachability (command on `PATH`, URL responds) |
 | `service install [--force] [--print]` / `service uninstall` | write, enable and start the systemd user unit for the running binary (by the path it was started from, so a Nix profile link survives updates), with a `PATH` of `~/.local/bin`, `~/.cargo/bin`, the binary's folder and the installing shell's `PATH`; a hand-written unit is replaced only with `--force` (kept as `.bak`); a running daemon is restarted only when idle |
-| `debug trace [--out file]` | record PipeWire graph events to a file for bug reports and test fixtures |
+| `debug trace [--out file] [--duration d]` | record PipeWire graph events to a file for bug reports and test fixtures |
+| `debug replay <trace>` | replay a trace through the detector with the config's `[detect]` settings and print its decisions |
 
 `<id>` accepts a full ID, a unique prefix, or `last`.
 

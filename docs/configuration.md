@@ -132,6 +132,12 @@ A daemon started by systemd doesn't inherit your shell's environment: see
 |---|---|---|
 | `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure notification. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
 
+## `[tray]`
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | `true` | Show the tray icon. Its menu records, stops, turns call detection off and on, and opens the recordings folder. It needs a StatusNotifierItem host: KDE Plasma, most other panels, or the AppIndicator extension on GNOME. |
+
 ## A complete example
 
 ```toml

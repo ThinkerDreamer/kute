@@ -15,7 +15,8 @@ so the transcript knows who said what without guessing:
 
 **Status: early, in daily use by its author.** A background daemon notices when an app opens
 your microphone, records the call, and transcribes and summarizes each conversation as it
-ends. You can also import recordings made elsewhere. Next: a tray icon and `kute doctor`. See
+ends. A tray icon shows what it's doing, and `kute doctor` checks your setup. You can also
+import recordings made elsewhere. See
 [the design](docs/superpowers/specs/2026-10-08-kute-design.md) and [the to-do list](docs/TODO.md).
 
 ## How it works
@@ -62,6 +63,7 @@ ends. You can also import recordings made elsewhere. Next: a tray icon and `kute
 ```bash
 cargo install --path .
 kute model download        # large-v3-turbo (1.6 GB) and the Silero VAD model
+kute doctor                # checks PipeWire, ffmpeg, the GPU backend, models and the summarizer
 ```
 
 Nix users: a flake is on its way. See [Installing](docs/install.md) for details.
@@ -88,8 +90,9 @@ See [Installing](docs/install.md#running-the-daemon-at-login) for API keys and f
 unit you wrote by hand.
 
 Then just take calls. While one is recorded, a notification "Recording: <app>" offers Stop and
-Discard. When a summary is ready, a notification shows its first line; click it
-to open `summary.md`. Control it with:
+Discard, and the tray icon turns into a red dot. When a summary is ready, a notification shows
+its first line; click it to open `summary.md`. The tray icon's menu records, stops, turns call
+detection off and on, and opens the recordings folder. From a terminal:
 
 ```bash
 kute status                 # idle, recording, ...; the current session; the queue
@@ -195,6 +198,9 @@ min_words = 80                    # shorter conversations aren't summarized
 
 [notify]
 open = ["xdg-open"]               # opens summary.md when you click "Summary ready"
+
+[tray]
+enabled = true                    # the tray icon
 ```
 
 Data lives in `~/.local/share/kute` (change it with `[storage] dir = ...`). The folders are

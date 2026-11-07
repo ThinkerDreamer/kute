@@ -1,11 +1,17 @@
 # Troubleshooting
 
-Start with these two:
+Start with these three:
 
 ```bash
+kute doctor                         # is everything kute needs installed and set up
 kute status                         # is the daemon running, what is it doing, what's queued
 journalctl --user -u kute -n 100    # its recent log, if it runs as a systemd service
 ```
+
+`kute doctor` prints one line per check: `ok`, `WARN` (kute runs, but something won't work) or
+`FAIL` (kute can't record or transcribe), each with what to do. It checks programs on your
+shell's `PATH` and, when the service is installed, on the service's `PATH` too, since that's the
+one the daemon uses.
 
 ## A call wasn't recorded
 
@@ -21,6 +27,9 @@ journalctl --user -u kute -n 100    # its recent log, if it runs as a systemd se
   daemon's `PATH`. Under systemd, that's the `Environment=PATH=...` line in the unit.
 
 To record by hand regardless of detection: `kute record "Title"`, then `kute stop`.
+
+If none of that explains it, record what PipeWire showed during a call and replay it through
+the detector; see [Reporting a bug](#reporting-a-bug).
 
 ## A call was recorded that shouldn't have been
 
@@ -82,6 +91,17 @@ The log (`journalctl --user -u kute`) says why after each click, e.g. `xdg-open 
   once it has moved from the popup to the history. Open the summary with
   `kute show last --summary` or `kute open last`.
 
+## There's no tray icon
+
+- **Is the daemon running, with the tray on?** The icon belongs to the daemon (`[tray] enabled`,
+  on by default). The log says "no tray host to show the icon" while there's no panel to show it
+  in; it appears once there is one.
+- **Look in the hidden icons.** While no call is being recorded, the icon is marked passive, and
+  Plasma puts it in the panel's overflow (the arrow). Right-click the arrow, *Configure System
+  Tray*, and set kute to *Always shown* if you want it in view.
+- **GNOME has no tray of its own.** Install the AppIndicator and KStatusNotifierItem Support
+  extension. `kute doctor` says whether a tray host is running.
+
 ## `kute` says it can't reach the daemon or `XDG_RUNTIME_DIR` is not set
 
 The CLI and the daemon talk over `$XDG_RUNTIME_DIR/kute.sock`, which exists only in a desktop
@@ -91,6 +111,21 @@ themselves.
 
 ## Reporting a bug
 
-Open an issue with what you did, what you expected, what happened, the output of `kute status`,
-and the relevant part of the log. Remove names and anything else private from transcripts and
-logs before you post them.
+Open an issue with what you did, what you expected, what happened, the output of `kute doctor`
+and `kute status`, and the relevant part of the log. Remove names and anything else private
+from transcripts and logs before you post them.
+
+For a call that was detected wrongly (not recorded, recorded when it shouldn't have been, split
+in two, never stopping), a trace of the PipeWire graph shows what kute saw:
+
+```bash
+kute debug trace                    # records until Ctrl-C, to kute-trace-<time>.jsonl
+kute debug trace --duration 2m --out call.jsonl
+kute debug replay call.jsonl        # what the detector does with it, with your [detect] settings
+```
+
+Start the trace, reproduce the problem (join and leave the call, open the app that misbehaves),
+then stop it. It records which audio streams apps open and close, not any audio. Device serial
+numbers, Bluetooth addresses, your user and host names and your home folder are replaced before
+anything is written; app names (Firefox, Zoom) and device names (your headset's model) are kept.
+Read it before you attach it: it's plain text.

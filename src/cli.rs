@@ -2,11 +2,14 @@
 
 use crate::config::{Config, SummaryBackend};
 use crate::daemon;
+use crate::detect::{Action, Detector, replay};
+use crate::doctor;
 use crate::index::HitKind;
 use crate::ipc::{self, Request, Response, Status};
 use crate::jobs::{self, ConversationsFailed, Job};
 use crate::models;
 use crate::pipeline;
+use crate::pw::trace;
 use crate::render;
 use crate::service;
 use crate::store::{LanguageChange, SessionState, Store, Track};
@@ -146,6 +149,29 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Check that everything kute needs is installed and set up
+    Doctor,
+    /// Tools for bug reports
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    /// Record PipeWire graph changes to a file, without serials, user or host names, until
+    /// Ctrl-C
+    Trace {
+        /// Where to write it (default: kute-trace-<time>.jsonl here; - for stdout)
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Stop after this long, e.g. 2m
+        #[arg(long)]
+        duration: Option<String>,
+    },
+    /// Show what the call detector does with a recorded trace
+    Replay { trace: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -234,6 +260,15 @@ pub fn run() -> Result<()> {
             ServiceCommand::Install { force, print } => service::install(*force, *print),
             ServiceCommand::Uninstall => service::uninstall(),
         };
+    }
+    if let Command::Debug {
+        command: DebugCommand::Trace { out, duration },
+    } = &cli.command
+    {
+        return debug_trace(out.as_deref(), duration.as_deref());
+    }
+    if let Command::Doctor = &cli.command {
+        return doctor::run(cli.config.as_deref());
     }
     let config = Config::load(cli.config.as_deref())?;
     let store = Store::open(config.data_dir()?)?;
@@ -392,7 +427,14 @@ pub fn run() -> Result<()> {
             },
         )?,
         Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
-        Command::Service { .. } => unreachable!("handled before the config is loaded"),
+        Command::Service { .. }
+        | Command::Doctor
+        | Command::Debug {
+            command: DebugCommand::Trace { .. },
+        } => unreachable!("handled before the config is loaded"),
+        Command::Debug {
+            command: DebugCommand::Replay { trace },
+        } => debug_replay(&config, &trace)?,
         Command::Model {
             command: ModelCommand::List,
         } => model_list(&store, &config),
@@ -472,6 +514,91 @@ impl Progress {
     /// Whether a terminal line was left without its newline (the download stopped early).
     fn line_open(&self) -> bool {
         self.tty && !self.last.is_empty() && !self.last.ends_with('\n')
+    }
+}
+
+fn debug_trace(out: Option<&std::path::Path>, duration: Option<&str>) -> Result<()> {
+    let duration = duration
+        .map(|d| {
+            let span: jiff::Span = d
+                .parse()
+                .with_context(|| format!("cannot read {d:?} as a duration (try 2m)"))?;
+            let d = jiff::SignedDuration::try_from(span)?;
+            Ok::<_, anyhow::Error>(d.unsigned_abs())
+        })
+        .transpose()?;
+    if out == Some(std::path::Path::new("-")) {
+        return trace::record(&mut std::io::stdout().lock(), duration);
+    }
+    let path = match out {
+        Some(path) => path.to_path_buf(),
+        None => PathBuf::from(format!(
+            "kute-trace-{}.jsonl",
+            time::now().strftime("%Y%m%d-%H%M%S")
+        )),
+    };
+    let mut file =
+        std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    eprintln!(
+        "kute: recording PipeWire changes to {} (Ctrl-C to stop)",
+        path.display()
+    );
+    eprintln!(
+        "kute: serials, MAC addresses, your user and host names and your home folder are \
+         replaced; app and device names are kept"
+    );
+    trace::record(&mut file, duration)
+}
+
+/// Replays a trace through the detector with this config's `[detect]` settings and prints
+/// each decision, so a bug report's trace shows what went wrong.
+fn debug_replay(config: &Config, path: &std::path::Path) -> Result<()> {
+    let entries = trace::read_file(path)?;
+    let snapshots = trace::snapshots(&entries);
+    let detect = &config.detect;
+    let tail = (detect.min_duration + detect.stop_grace)
+        .unsigned_abs()
+        .as_millis() as u64;
+    let until = entries.last().map_or(0, |e| e.t_ms) + tail + 1_000;
+    let mut detector = Detector::new(detect, 0);
+    let mut shown = 0;
+    let mut last: Option<&crate::pw::Snapshot> = None;
+    let mut actions = replay(&mut detector, &snapshots, until)
+        .into_iter()
+        .peekable();
+    let at = |t: u64| format!("{:>8.1} s", t as f64 / 1000.0);
+    for (t, snap) in &snapshots {
+        while let Some((ta, action)) = actions.next_if(|(ta, _)| ta < t) {
+            println!("{}  => {}", at(ta), describe_action(&action));
+        }
+        let empty = crate::pw::Snapshot::default();
+        for line in trace::describe_changes(last.unwrap_or(&empty), snap) {
+            println!("{}  {line}", at(*t));
+            shown += 1;
+        }
+        last = Some(snap);
+    }
+    for (ta, action) in actions {
+        println!("{}  => {}", at(ta), describe_action(&action));
+    }
+    if shown == 0 {
+        println!("no audio streams in this trace");
+    }
+    Ok(())
+}
+
+fn describe_action(action: &Action) -> String {
+    match action {
+        Action::Start { trigger } => format!(
+            "start (tentative), {}",
+            trigger
+                .as_ref()
+                .and_then(|a| a.name.clone().or_else(|| a.binary.clone()))
+                .unwrap_or_else(|| "manual".into())
+        ),
+        Action::Commit => "recording".into(),
+        Action::Finish => "finish and process".into(),
+        Action::Discard => "discard".into(),
     }
 }
 

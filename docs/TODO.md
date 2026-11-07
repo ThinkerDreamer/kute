@@ -54,8 +54,9 @@ Found by comparing kute's transcript of a short English/Italian test call with t
   (`src/transcribe/whisper.rs`) each create a `WhisperState` (KV cache + backend buffers). Keep one
   state in the transcriber; whisper.cpp resets it on every `full` call.
 - [ ] **whisper.cpp logs are swallowed.** `cli::run` installs the logging hooks with no backend, so
-  messages like "no GPU found, using CPU" never reach the user. Add a `-v` flag with a minimal
-  logger, or report the backend in `kute doctor`.
+  messages like "no GPU found, using CPU" never reach the user. `kute doctor` reports the backend
+  kute was built with and whether a Vulkan or NVIDIA driver is there, not what whisper.cpp ended
+  up using. Add a `-v` flag with a minimal logger.
 - [ ] **`Store::open` changes permissions on an existing folder.** It sets `storage.dir` to 0700 on
   every run, so pointing it at a shared or existing directory silently changes its mode. Only
   chmod directories kute creates, or document the behavior.
@@ -74,8 +75,8 @@ Found in the final review of plan 3 and deferred.
 - [ ] **WAVs over 4 GiB fail.** hound's RIFF sizes are 32-bit: about 37 h of 16 kHz audio per
   track.
 - [ ] **No `pw-dump` repeats the same log line.** The monitor reconnects every 30 s and logs "lost
-  the PipeWire graph" each time. `kute doctor` (plan 4) should check for `pw-dump` and
-  `pw-record`.
+  the PipeWire graph" each time. `kute doctor` now checks for `pw-dump` and `pw-record` (on the
+  service's `PATH` too), but the daemon still repeats the line.
 - [ ] **Suspend/resume during a session is untested.** The daemon's clock is monotonic and pauses
   in suspend while the wall clock jumps; check what the detector and the track offsets make of it.
 - [ ] **Live VAD lost, then a crash.** After a track loses its speech detection, `finish` makes the
@@ -158,3 +159,13 @@ that.
 - [ ] **No activation token for the opener.** The notification server sends one with the click
   (`ActivationToken`, spec 1.2), but notify-rust doesn't pass it on, so on Wayland the editor may
   open behind other windows. Set `XDG_ACTIVATION_TOKEN` for the child once it's available.
+
+## From the tray, doctor and trace (plan 4b)
+
+- [ ] **Real detector traces.** `tests/fixtures/traces/` has two hand-written traces. Record real
+  ones with `kute debug trace` (spec section 10: Jitsi with Plasma mute, a Meet call, a reconnect,
+  pavucontrol open, a website mic check) and add tests for them.
+- [ ] **The tray doesn't show how long a call has been recorded.** `Status` has no start time; the
+  menu could say "Recording: Zoom (12 min)".
+- [ ] **`kute doctor` doesn't load the Whisper model.** It checks that the file is there, not that
+  it loads on the GPU. A `--deep` option could load it and transcribe a second of silence.

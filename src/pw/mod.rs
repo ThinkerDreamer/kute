@@ -2,6 +2,7 @@
 
 mod graph;
 mod monitor;
+pub mod trace;
 
 pub use graph::*;
 pub use monitor::*;

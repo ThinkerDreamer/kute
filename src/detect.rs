@@ -366,6 +366,40 @@ impl Detector {
     }
 }
 
+/// Feeds a trace's snapshots to a detector the way the daemon does: each snapshot at its
+/// time, and a tick every 500 ms in between and up to `until_ms`. Returns each action with
+/// the time it came.
+pub fn replay(
+    detector: &mut Detector,
+    snapshots: &[(u64, crate::pw::Snapshot)],
+    until_ms: u64,
+) -> Vec<(u64, Action)> {
+    const TICK_MS: u64 = 500;
+    let mut actions = Vec::new();
+    let mut next_tick = TICK_MS;
+    let mut snaps = snapshots.iter().peekable();
+    loop {
+        let snap_at = snaps.peek().map(|(t, _)| *t);
+        match snap_at {
+            Some(t) if t <= next_tick => {
+                let (_, snap) = snaps.next().expect("peeked");
+                actions.extend(
+                    detector
+                        .streams(&snap.streams, t)
+                        .into_iter()
+                        .map(|a| (t, a)),
+                );
+            }
+            _ if next_tick <= until_ms => {
+                actions.extend(detector.tick(next_tick).into_iter().map(|a| (next_tick, a)));
+                next_tick += TICK_MS;
+            }
+            _ => break,
+        }
+    }
+    actions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

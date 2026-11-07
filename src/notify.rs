@@ -409,23 +409,28 @@ impl Inner {
         } else {
             session.dir.clone()
         };
-        let Some((program, args)) = self.open.split_first() else {
-            return;
-        };
-        let mut command = Command::new(program);
-        command.args(args).arg(&path);
-        // A service started before the desktop session has no display: take the one the
-        // session gave systemd since.
-        for (key, value) in graphical_env() {
-            command.env(key, value);
+        open_with(&self.open, &path);
+    }
+}
+
+/// Runs the `notify.open` command on `path` and waits for it, logging a failure.
+pub fn open_with(open: &[String], path: &std::path::Path) {
+    let Some((program, args)) = open.split_first() else {
+        return;
+    };
+    let mut command = Command::new(program);
+    command.args(args).arg(path);
+    // A service started before the desktop session has no display: take the one the
+    // session gave systemd since.
+    for (key, value) in graphical_env() {
+        command.env(key, value);
+    }
+    match command.status() {
+        Ok(status) if !status.success() => {
+            eprintln!("kute: {program} {} failed ({status})", path.display())
         }
-        match command.status() {
-            Ok(status) if !status.success() => {
-                eprintln!("kute: {program} {} failed ({status})", path.display())
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("kute: could not run {program}: {e}"),
-        }
+        Ok(_) => {}
+        Err(e) => eprintln!("kute: could not run {program}: {e}"),
     }
 }
 

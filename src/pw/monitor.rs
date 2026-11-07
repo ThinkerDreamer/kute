@@ -4,7 +4,7 @@ use super::{Graph, Snapshot};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io::{BufReader, Read};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,19 +19,35 @@ pub enum MonitorEvent {
 /// Feeds `pw-dump`'s concatenated JSON arrays into a fresh graph, and calls `on_change`
 /// after every array that changed the snapshot. The first array always counts as a change.
 pub fn read_updates(r: impl Read, mut on_change: impl FnMut(Snapshot)) -> Result<()> {
-    // `from_reader` reads a byte at a time, so give it a buffer.
-    let r = BufReader::new(r);
     let mut graph = Graph::default();
     let mut last = None;
-    for update in serde_json::Deserializer::from_reader(r).into_iter::<Vec<Value>>() {
-        graph.apply(&update.context("parsing pw-dump output")?);
+    read_arrays(r, |update| {
+        graph.apply(&update);
         let snap = graph.snapshot();
         if last.as_ref() != Some(&snap) {
             last = Some(snap.clone());
             on_change(snap);
         }
+    })
+}
+
+/// Calls `each` with every JSON array `pw-dump` prints, as it arrives.
+pub fn read_arrays(r: impl Read, mut each: impl FnMut(Vec<Value>)) -> Result<()> {
+    // `from_reader` reads a byte at a time, so give it a buffer.
+    let r = BufReader::new(r);
+    for update in serde_json::Deserializer::from_reader(r).into_iter::<Vec<Value>>() {
+        each(update.context("parsing pw-dump output")?);
     }
     Ok(())
+}
+
+/// Starts `pw-dump --monitor` with its output piped.
+pub fn spawn_pw_dump() -> std::io::Result<Child> {
+    Command::new("pw-dump")
+        .args(["--monitor", "--no-colors"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
 }
 
 /// Watches the graph on its own thread until `tx`'s receiver is gone, restarting
@@ -56,12 +72,7 @@ pub fn spawn(tx: Sender<MonitorEvent>) -> JoinHandle<()> {
 
 /// One run of `pw-dump`. Returns why it ended, or `None` if the receiver is gone.
 fn run_once(tx: &Sender<MonitorEvent>) -> Option<String> {
-    let mut child = match Command::new("pw-dump")
-        .args(["--monitor", "--no-colors"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match spawn_pw_dump() {
         Ok(child) => child,
         Err(e) => return Some(format!("starting pw-dump: {e}")),
     };

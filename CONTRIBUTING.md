@@ -50,6 +50,15 @@ afterwards. To keep test calls apart from your real ones, give the development b
 config with a scratch `[storage] dir` and pass it with `--config`:
 `cargo run -- --config dev.toml daemon`.
 
+## Detector traces
+
+`tests/traces.rs` replays PipeWire traces through the call detector. A trace made with
+`kute debug trace` on a real call (see [Troubleshooting](docs/troubleshooting.md#reporting-a-bug))
+is the best fixture for a detection bug: put it in `tests/fixtures/traces/`, check it for anything
+private, and add a test that asserts what should have happened. `kute debug replay <trace>` shows
+what the detector does with it now. Traces named `synthetic-*` are written by hand in the same
+format.
+
 ## Where things are
 
 - `src/` is one crate. Each module opens with a comment saying what it's for.

@@ -16,6 +16,7 @@ pub struct Config {
     pub detect: DetectConfig,
     pub capture: CaptureConfig,
     pub notify: NotifyConfig,
+    pub tray: TrayConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -159,6 +160,19 @@ impl Default for NotifyConfig {
     }
 }
 
+/// The tray icon the daemon shows.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TrayConfig {
+    pub enabled: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("kute").join("config.toml"))
@@ -294,6 +308,17 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
         assert_eq!(expand_tilde(Path::new("/x/~/y")), PathBuf::from("/x/~/y"));
+    }
+
+    #[test]
+    fn the_tray_is_on_unless_turned_off() {
+        assert!(Config::parse("").unwrap().tray.enabled);
+        assert!(
+            !Config::parse("[tray]\nenabled = false\n")
+                .unwrap()
+                .tray
+                .enabled
+        );
     }
 
     #[test]

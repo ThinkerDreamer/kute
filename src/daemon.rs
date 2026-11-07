@@ -18,6 +18,7 @@ use crate::recorder::VadFactory;
 use crate::store::Store;
 use crate::transcribe::SpeechDetector;
 use crate::transcribe::whisper::SileroVad;
+use crate::tray::{Tray, TrayAction};
 use crate::worker::{self, WorkerDone, WorkerMsg};
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -38,6 +39,8 @@ pub enum Event {
     Worker(WorkerDone),
     /// A notification's Stop or Discard button.
     Click(Click),
+    /// The tray icon's menu.
+    Tray(TrayAction),
     Tick,
 }
 
@@ -112,6 +115,10 @@ impl Daemon {
             Event::Worker(done) => self.done(done, now_ms),
             Event::Click(click) => {
                 self.click(click, now_ms);
+                Ok(())
+            }
+            Event::Tray(action) => {
+                self.tray(action, now_ms);
                 Ok(())
             }
         }
@@ -217,12 +224,33 @@ impl Daemon {
             Click::Discard(id) => (Request::Discard, id),
             Click::OpenSummary(_) | Click::OpenFolder(_) => return,
         };
-        if self.live_id() != id {
-            eprintln!("kute: {id} is no longer recording; ignoring the notification's button");
+        self.act(request, Some(&id), "the notification", now_ms);
+    }
+
+    /// The tray menu's choice. Stop and Discard name the session the menu showed, like a
+    /// notification's buttons.
+    fn tray(&mut self, action: TrayAction, now_ms: u64) {
+        let (request, id) = match action {
+            TrayAction::Record => (Request::Record { title: None }, None),
+            TrayAction::Stop(id) => (Request::Stop, Some(id)),
+            TrayAction::Discard(id) => (Request::Discard, Some(id)),
+            TrayAction::Pause => (Request::Pause, None),
+            TrayAction::Resume => (Request::Resume, None),
+        };
+        self.act(request, id.as_deref(), "the tray", now_ms);
+    }
+
+    /// Runs a request from a button, and logs what came of it. `for_id` is the session the
+    /// button was shown for; if another one is recording by now, nothing happens.
+    fn act(&mut self, request: Request, for_id: Option<&str>, from: &str, now_ms: u64) {
+        if let Some(id) = for_id
+            && self.live_id() != id
+        {
+            eprintln!("kute: {id} is no longer recording; ignoring {from}");
             return;
         }
         match self.request(request, now_ms) {
-            Response::Ok { message } => eprintln!("kute: {message} (from the notification)"),
+            Response::Ok { message } => eprintln!("kute: {message} (from {from})"),
             Response::Error { message } => eprintln!("kute: {message}"),
             Response::Status { .. } => {}
         }
@@ -557,6 +585,16 @@ pub fn run(store: Store, config: Config) -> Result<()> {
     });
     let (click_tx, click_rx) = mpsc::channel();
     forward(click_rx, &events_tx, Event::Click);
+
+    let tray = if config.tray.enabled {
+        let (tray_tx, tray_rx) = mpsc::channel();
+        forward(tray_rx, &events_tx, Event::Tray);
+        Tray::spawn(tray_tx, store.sessions_dir(), config.notify.open.clone())
+            .inspect_err(|e| eprintln!("kute: no tray icon: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
     drop(events_tx);
 
     let vad = vad_factory(&store);
@@ -568,10 +606,18 @@ pub fn run(store: Store, config: Config) -> Result<()> {
     }
     eprintln!("kute: daemon started");
     let clock = Instant::now();
+    let mut shown = None;
     for event in events {
         let now_ms = clock.elapsed().as_millis() as u64;
         if let Err(e) = daemon.handle(event, now_ms) {
             eprintln!("kute: {e:#}");
+        }
+        if let Some(tray) = &tray {
+            let status = daemon.status();
+            if shown.as_ref() != Some(&status) {
+                tray.show(&status);
+                shown = Some(status);
+            }
         }
     }
     let _ = daemon.worker.send(WorkerMsg::Shutdown);
