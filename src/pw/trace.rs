@@ -336,10 +336,12 @@ pub fn record(out: &mut impl Write, duration: Option<std::time::Duration>) -> Re
     let timer = duration.map(|duration| {
         let id = child.id();
         std::thread::spawn(move || {
-            if cancelled.recv_timeout(duration) == Err(RecvTimeoutError::Timeout) {
+            let fire = cancelled.recv_timeout(duration) == Err(RecvTimeoutError::Timeout);
+            if fire {
                 // SAFETY: plain kill(2) on our own unreaped child.
                 unsafe { libc::kill(id as libc::pid_t, libc::SIGTERM) };
             }
+            fire
         })
     });
     let header = writeln!(out, "{}", header()).and_then(|()| out.flush());
@@ -380,17 +382,16 @@ pub fn record(out: &mut impl Write, duration: Option<std::time::Duration>) -> Re
         }
     });
     drop(cancel);
-    if let Some(timer) = timer {
-        let _ = timer.join();
-    }
+    let timed_out = timer.is_some_and(|t| t.join().unwrap_or(false));
     let _ = child.kill();
     let _ = child.wait();
     if let Some(e) = failed {
         return Err(e.context("writing the trace"));
     }
-    // pw-dump killed for `duration` ends its output mid-array at worst.
+    // pw-dump stopped at the end of `duration` may end its output mid-array; anything
+    // else that cut the read short is an error.
     if let Err(e) = read
-        && duration.is_none()
+        && !timed_out
     {
         return Err(e);
     }

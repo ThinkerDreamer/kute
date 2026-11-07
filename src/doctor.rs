@@ -306,33 +306,34 @@ pub fn pipewire_check(snap: &Snapshot, mic: Option<&str>) -> Check {
             .and_then(|s| s.description.clone())
             .unwrap_or_else(|| name.to_owned())
     };
-    let Some(source) = &snap.default_source else {
-        return Check::fail(
-            "PipeWire",
-            "no default microphone; pick one in the sound settings",
-        );
-    };
     if snap.default_sink.is_none() {
         return Check::fail(
             "PipeWire",
             "no default output; the others' side can't be recorded",
         );
     }
+    // A matching capture.mic is recorded whatever the default is.
+    if let Some((mic, found)) = mic.and_then(|m| Some((m, snap.find_source(m)?))) {
+        return Check::ok(
+            "PipeWire",
+            format!("capture.mic {mic:?} is {}", describe(&found)),
+        );
+    }
+    let Some(source) = &snap.default_source else {
+        return Check::fail(
+            "PipeWire",
+            "no default microphone; pick one in the sound settings",
+        );
+    };
     if let Some(mic) = mic {
-        return match snap.find_source(mic) {
-            Some(found) => Check::ok(
-                "PipeWire",
-                format!("capture.mic {mic:?} is {}", describe(&found)),
+        return Check::warn(
+            "PipeWire",
+            format!(
+                "capture.mic {mic:?} matches no microphone, so the default ({}) is used; \
+                 plugged in?",
+                describe(source)
             ),
-            None => Check::warn(
-                "PipeWire",
-                format!(
-                    "capture.mic {mic:?} matches no microphone, so the default ({}) is \
-                     used; plugged in?",
-                    describe(source)
-                ),
-            ),
-        };
+        );
     }
     Check::ok(
         "PipeWire",
@@ -761,8 +762,11 @@ mod tests {
         let mut snap = snapshot();
         snap.default_sink = None;
         assert_eq!(pipewire_check(&snap, None).level, Level::Fail);
+        snap.default_sink = Some("alsa_output.hdmi".into());
         snap.default_source = None;
         assert_eq!(pipewire_check(&snap, None).level, Level::Fail);
+        // A configured mic that is there doesn't need a default.
+        assert_eq!(pipewire_check(&snap, Some("headset")).level, Level::Ok);
     }
 
     #[test]
