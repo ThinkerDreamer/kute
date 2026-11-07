@@ -381,7 +381,7 @@ pub fn replay(
     loop {
         let snap_at = snaps.peek().map(|(t, _)| *t);
         match snap_at {
-            Some(t) if t <= next_tick => {
+            Some(t) if t <= next_tick && t <= until_ms => {
                 let (_, snap) = snaps.next().expect("peeked");
                 actions.extend(
                     detector

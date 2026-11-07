@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
 
 /// The trace format's version, in the header line.
 pub const FORMAT: u64 = 1;
@@ -152,7 +153,7 @@ impl Scrubber {
     }
 
     fn learn(&mut self, secret: &str, kind: &'static str) {
-        if secret.len() < MIN_SECRET_LEN || self.secrets.contains_key(secret) {
+        if secret.is_empty() || self.secrets.contains_key(secret) {
             return;
         }
         let placeholder = match kind {
@@ -197,15 +198,22 @@ impl Scrubber {
 
     fn replace_in_map(&self, map: &mut Map<String, Value>) {
         for (key, v) in map.iter_mut() {
-            // A numeric secret (a serial) is not text to search, so replace it whole.
-            if v.is_number() && SECRET_PROPS.iter().any(|(k, _)| k == key) {
-                *v = Value::String(
-                    self.secrets
-                        .get(&v.to_string())
-                        .cloned()
-                        .unwrap_or_else(|| "scrubbed".into()),
-                );
-                continue;
+            // A secret prop is replaced whole, however short: text search skips short ones.
+            if SECRET_PROPS.iter().any(|(k, _)| k == key) {
+                let text = match v {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    *v = Value::String(
+                        self.secrets
+                            .get(&text)
+                            .cloned()
+                            .unwrap_or_else(|| "scrubbed".into()),
+                    );
+                    continue;
+                }
             }
             self.replace_in(v);
         }
@@ -219,6 +227,7 @@ impl Scrubber {
         }
         // Longest first, so a secret that contains another is replaced whole.
         let mut secrets: Vec<_> = self.secrets.iter().collect();
+        secrets.retain(|(s, _)| s.len() >= MIN_SECRET_LEN);
         secrets.sort_by_key(|(s, _)| std::cmp::Reverse(s.len()));
         for (secret, placeholder) in secrets {
             out = out.replace(secret.as_str(), placeholder);
@@ -321,15 +330,28 @@ pub fn describe_changes(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 pub fn record(out: &mut impl Write, duration: Option<std::time::Duration>) -> Result<()> {
     let mut child = super::spawn_pw_dump().context("starting pw-dump (is PipeWire installed?)")?;
     let stdout = child.stdout.take().expect("stdout is piped");
-    if let Some(duration) = duration {
+    // Stops pw-dump after `duration`, unless cancelled first. It is joined before the child
+    // is reaped, so the PID it kills is still pw-dump's.
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let timer = duration.map(|duration| {
         let id = child.id();
         std::thread::spawn(move || {
-            std::thread::sleep(duration);
-            // SAFETY: plain kill(2); at worst the PID is gone already.
-            unsafe { libc::kill(id as libc::pid_t, libc::SIGTERM) };
-        });
+            if cancelled.recv_timeout(duration) == Err(RecvTimeoutError::Timeout) {
+                // SAFETY: plain kill(2) on our own unreaped child.
+                unsafe { libc::kill(id as libc::pid_t, libc::SIGTERM) };
+            }
+        })
+    });
+    let header = writeln!(out, "{}", header()).and_then(|()| out.flush());
+    if let Err(e) = header {
+        drop(cancel);
+        if let Some(timer) = timer {
+            let _ = timer.join();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(anyhow::Error::from(e).context("writing the trace"));
     }
-    writeln!(out, "{}", header())?;
     let started = std::time::Instant::now();
     let mut scrubber = Scrubber::for_this_machine();
     let mut graph = Graph::default();
@@ -350,9 +372,17 @@ pub fn record(out: &mut impl Write, duration: Option<std::time::Duration>) -> Re
         scrubber.scrub(&mut objects);
         match write_entry(out, &Entry { t_ms, objects }) {
             Ok(()) => written += 1,
-            Err(e) => failed = Some(e),
+            Err(e) => {
+                failed = Some(e);
+                // Closes the pipe, so the read ends instead of waiting for more updates.
+                let _ = child.kill();
+            }
         }
     });
+    drop(cancel);
+    if let Some(timer) = timer {
+        let _ = timer.join();
+    }
     let _ = child.kill();
     let _ = child.wait();
     if let Some(e) = failed {
@@ -434,6 +464,21 @@ mod tests {
         assert_eq!(props["node.name"], "bluez_output.00_00_00_00_00_00.1");
         assert_eq!(props["api.bluez5.address"], "MAC-1");
         assert_eq!(props["application.name"], "Firefox");
+    }
+
+    #[test]
+    fn short_device_secrets_are_still_replaced_where_they_are_named() {
+        let mut objects = vec![json!({"info": {"props": {
+            "device.serial": "7",
+            "device.bus-path": 12,
+            "node.name": "alsa_input.7"
+        }}})];
+        scrubber().scrub(&mut objects);
+        let props = &objects[0]["info"]["props"];
+        assert_eq!(props["device.serial"], "SERIAL-1");
+        assert_eq!(props["device.bus-path"], "BUS-1");
+        // Too short to search for inside other text.
+        assert_eq!(props["node.name"], "alsa_input.7");
     }
 
     #[test]

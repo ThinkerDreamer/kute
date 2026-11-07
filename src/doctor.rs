@@ -133,37 +133,58 @@ fn storage(config: &Config) -> Vec<Check> {
         Ok(dir) => dir,
         Err(e) => return vec![Check::fail("storage", format!("{e:#}"))],
     };
+    storage_check(&dir)
+}
+
+/// Whether kute can write to `dir` (or create it, when it doesn't exist yet), and how much
+/// room there is.
+pub fn storage_check(dir: &Path) -> Vec<Check> {
     let shown = dir.display();
-    if !dir.exists() {
-        return vec![Check::ok(
-            "storage",
-            format!("{shown} doesn't exist yet; kute creates it"),
-        )];
-    }
-    let probe = dir.join(".kute-doctor");
-    if let Err(e) = std::fs::write(&probe, b"") {
+    // The folder kute would create `dir` in, when it isn't there yet.
+    let Some(existing) = dir.ancestors().find(|a| a.exists()) else {
         return vec![Check::fail(
             "storage",
-            format!("cannot write to {shown}: {e}"),
+            format!("{shown}: no parent folder exists"),
         )];
+    };
+    // A name nothing else uses, created only if absent: never touches someone's file.
+    let probe = existing.join(format!(".kute-doctor-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+        }
+        Err(e) => {
+            return vec![Check::fail(
+                "storage",
+                format!("cannot write to {}: {e}", existing.display()),
+            )];
+        }
     }
-    let _ = std::fs::remove_file(&probe);
+    let note = if existing == dir {
+        String::new()
+    } else {
+        "; it doesn't exist yet, kute creates it".into()
+    };
     let mut checks = Vec::new();
-    match free_bytes(&dir) {
+    match free_bytes(existing) {
         // An hour of a call is about 230 MB of WAV (two 16 kHz tracks) before compression.
         Some(free) if free < 2_000_000_000 => checks.push(Check::warn(
             "storage",
             format!(
                 "{shown}: only {:.1} GB free; an hour of call takes about 0.25 GB until it \
-                 is compressed",
+                 is compressed{note}",
                 free as f64 / 1e9
             ),
         )),
         Some(free) => checks.push(Check::ok(
             "storage",
-            format!("{shown} ({:.0} GB free)", free as f64 / 1e9),
+            format!("{shown} ({:.0} GB free{note})", free as f64 / 1e9),
         )),
-        None => checks.push(Check::ok("storage", format!("{shown}"))),
+        None => checks.push(Check::ok("storage", format!("{shown}{note}"))),
     }
     checks
 }
@@ -196,7 +217,13 @@ fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
     std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(program))
-        .find(|p| p.is_file())
+        .find(|p| is_executable(p))
+}
+
+/// A file someone may run, as `Command` needs it.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// What each program is for, and whether kute can work without it.
@@ -418,7 +445,7 @@ fn summarizer(config: &Config, shell_path: &OsStr, service_path: Option<&str>) -
             };
             let path = expand_tilde(Path::new(program));
             let found = if path.components().count() > 1 {
-                path.is_file()
+                is_executable(&path)
             } else {
                 find(program, shell_path).is_some()
                     || service_path.is_some_and(|p| find(program, OsStr::new(p)).is_some())
@@ -627,6 +654,34 @@ mod tests {
             checks[1].detail.contains("service's PATH"),
             "{}",
             checks[1].detail
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_run_is_not_found() {
+        let shell = tempfile::tempdir().unwrap();
+        std::fs::write(shell.path().join("ffmpeg"), "").unwrap();
+        let checks = programs(shell.path().as_os_str(), None);
+        assert_eq!(level_of(&checks, "ffmpeg"), Level::Fail);
+    }
+
+    #[test]
+    fn storage_is_checked_where_it_would_be_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checks = storage_check(&tmp.path().join("a/b"));
+        assert_eq!(checks[0].level, Level::Ok, "{}", checks[0].detail);
+        assert!(checks[0].detail.contains("kute creates it"));
+        // The probe leaves nothing behind, and never touches a file already there.
+        std::fs::write(tmp.path().join(".kute-doctor"), "mine").unwrap();
+        storage_check(tmp.path());
+        let names: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, [".kute-doctor"]);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".kute-doctor")).unwrap(),
+            "mine"
         );
     }
 
