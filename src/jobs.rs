@@ -156,6 +156,32 @@ impl std::fmt::Display for ConversationsFailed {
 
 impl std::error::Error for ConversationsFailed {}
 
+/// Saves a detail edit (title, others' name, notes, languages) to the session's meta.toml,
+/// and nothing else. The daemon does this as soon as an edit arrives, so a transcription or
+/// summary already running picks it up for its next conversation; the job itself, run
+/// later, saves it again and rewrites the documents. `None` for any other job.
+pub fn save_details(job: &Job, store: &Store) -> Result<Option<(Session, Meta)>> {
+    let id = match job {
+        Job::Title { id, .. }
+        | Job::Others { id, .. }
+        | Job::Notes { id, .. }
+        | Job::Language { id, .. } => id,
+        _ => return Ok(None),
+    };
+    let session = store.resolve(id)?;
+    let meta = session.update_meta(|m| match job {
+        Job::Title { title, .. } => m.title = Some(title.clone()),
+        Job::Others { name, .. } => {
+            let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            m.others_name = name.map(String::from);
+        }
+        Job::Notes { notes, .. } => m.notes = notes.clone(),
+        Job::Language { languages, .. } => languages.apply(&mut m.transcribe),
+        _ => {}
+    })?;
+    Ok(Some((session, meta)))
+}
+
 /// Runs one job. `asr` holds the Whisper provider between jobs; it is built here on the first
 /// job that transcribes with the configured model.
 pub fn run(
@@ -267,33 +293,28 @@ pub fn run(
             }
             Ok(outcome(done, &session))
         }
-        Job::Title { id, title } => {
-            let session = store.resolve(id)?;
-            let meta = session.update_meta(|m| m.title = Some(title.clone()))?;
+        Job::Title { .. } => {
+            let (session, meta) = save_details(job, store)?.expect("a detail edit");
             pipeline::write_documents(&session, &meta, &config.labels)?;
             pipeline::index_session(&pipeline::open_index(store)?, &session)?;
             Ok(outcome(Done::default(), &session))
         }
-        Job::Others { id, name } => {
+        Job::Others { .. } => {
             // The transcript shows the label; summaries already written keep the old one
             // until the session is summarized again.
-            let session = store.resolve(id)?;
-            let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-            let meta = session.update_meta(|m| m.others_name = name.map(String::from))?;
+            let (session, meta) = save_details(job, store)?.expect("a detail edit");
             pipeline::write_documents(&session, &meta, &config.labels)?;
             Ok(outcome(Done::default(), &session))
         }
-        Job::Notes { id, notes } => {
+        Job::Notes { .. } => {
             // Only the summarizer reads the notes, so there are no documents to rewrite.
-            let session = store.resolve(id)?;
-            session.update_meta(|m| m.notes = notes.clone())?;
+            let (session, _) = save_details(job, store)?.expect("a detail edit");
             Ok(outcome(Done::default(), &session))
         }
-        Job::Language { id, languages } => {
+        Job::Language { id, .. } => {
             // Conversations transcribed from now on use them; earlier ones keep their text
             // until they are transcribed again.
-            let session = store.resolve(id)?;
-            let meta = session.update_meta(|m| languages.apply(&mut m.transcribe))?;
+            let (session, meta) = save_details(job, store)?.expect("a detail edit");
             let transcribed = meta
                 .conversations
                 .iter()

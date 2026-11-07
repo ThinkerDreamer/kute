@@ -414,8 +414,13 @@ impl Daemon {
     fn enqueue(&mut self, job: Job) -> Result<()> {
         let covered = matches!(job, Job::Process { .. }) && self.queue.contains(&job);
         if job.edits_details() {
-            // Quick, and the languages must be set before the session's next conversation
-            // is transcribed: ahead of all but earlier edits.
+            // Saved now, so a Process job already running for the session uses the new
+            // languages, notes and names from its next conversation on.
+            if let Err(e) = crate::jobs::save_details(&job, &self.store) {
+                eprintln!("kute: {job}: {e:#}");
+            }
+            // The job rewrites the documents; it is quick, so it goes ahead of all but
+            // earlier edits.
             let at = self.queue.iter().take_while(|j| j.edits_details()).count();
             self.queue.insert(at, job);
         } else if !covered {

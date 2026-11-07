@@ -12,7 +12,9 @@ use kute::jobs::{Job, Outcome, Problems};
 use kute::merge::Line;
 use kute::notify::Click;
 use kute::pw::{App, MonitorEvent, Snapshot, Source, Stream, StreamKind};
-use kute::store::{Meta, SessionState, Stage, Step, Store, Track, Trigger, TriggerKind};
+use kute::store::{
+    LanguageChange, Meta, SessionState, Stage, Step, Store, Track, Trigger, TriggerKind,
+};
 use kute::testing::{FakeSource, RecordingNotifier, run_vad};
 use kute::tray::TrayAction;
 use kute::worker::{WorkerDone, WorkerMsg};
@@ -421,6 +423,31 @@ fn detail_edits_go_ahead_of_processing_in_the_order_given() {
     assert_eq!(h.sent(), vec![others.clone()]);
     h.done(others, Some("s2"), None);
     assert_eq!(h.sent(), vec![Job::Process { id: "s1".into() }]);
+}
+
+#[test]
+fn detail_edits_are_saved_at_once_for_the_job_already_running() {
+    let mut h = Harness::new();
+    h.ok(Request::Record { title: None });
+    let id = h.daemon.status().session.expect("a session");
+    // Something long is running: the edit's own job waits behind it.
+    h.ok(Request::Job { job: Job::Reindex });
+    let languages = LanguageChange {
+        me: Some(vec!["ru".into()]),
+        ..Default::default()
+    };
+    h.daemon
+        .handle(
+            Event::Tray(TrayAction::Edit(Job::Language {
+                id: id.clone(),
+                languages,
+            })),
+            h.now,
+        )
+        .unwrap();
+    assert_eq!(h.sent(), vec![Job::Reindex]);
+    let meta = h.store.session(&id).unwrap().load_meta().unwrap();
+    assert_eq!(meta.transcribe.for_track(Track::Me), ["ru"]);
 }
 
 #[test]

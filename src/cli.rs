@@ -740,9 +740,18 @@ fn search(store: &Store, config: &Config, query: &str, limit: usize) -> Result<(
     if hits.is_empty() {
         println!("no matches");
     }
+    // Each session's labels: it may name the others (`kute others`).
+    let mut labels = std::collections::HashMap::new();
     for hit in hits {
         match hit.kind {
             HitKind::Line => {
+                let labels = labels.entry(hit.session_id.clone()).or_insert_with(|| {
+                    store
+                        .resolve(&hit.session_id)
+                        .and_then(|s| s.load_meta())
+                        .map(|m| m.labels(&config.labels))
+                        .unwrap_or_else(|_| config.labels.clone())
+                });
                 let at = hit
                     .started_at
                     .parse::<jiff::Zoned>()
@@ -760,7 +769,7 @@ fn search(store: &Store, config: &Config, query: &str, limit: usize) -> Result<(
                 println!(
                     "{}  {at}  {}: {}",
                     hit.session_id,
-                    render::label(&config.labels, track),
+                    render::label(labels, track),
                     hit.text
                 );
             }

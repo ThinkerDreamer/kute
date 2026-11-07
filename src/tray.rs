@@ -223,8 +223,9 @@ pub struct KuteTray {
     actions: Sender<TrayAction>,
     store: Store,
     open: Vec<String>,
-    /// What asks for the call's details; `None` without kdialog or zenity.
-    dialogs: Option<Dialogs>,
+    /// Where to look for kdialog or zenity; `None`: `PATH`. Looked up each time the menu
+    /// opens, so one installed while kute runs is used straight away.
+    dialog_path: Option<std::ffi::OsString>,
 }
 
 impl KuteTray {
@@ -233,11 +234,18 @@ impl KuteTray {
         let _ = self.actions.send(action);
     }
 
+    fn dialogs(&self) -> Option<Dialogs> {
+        match &self.dialog_path {
+            Some(path) => Dialogs::find_in(path),
+            None => Dialogs::find(),
+        }
+    }
+
     /// Asks for one of the session's details in a dialog, on a thread of its own: the menu
     /// must not wait for it. The answer goes to the daemon even if the call has ended by
     /// then; it is the same session.
     fn edit(&self, id: String, detail: Detail) {
-        let Some(dialogs) = self.dialogs.clone() else {
+        let Some(dialogs) = self.dialogs() else {
             return;
         };
         let (store, actions) = (self.store.clone(), self.actions.clone());
@@ -345,7 +353,7 @@ impl ksni::Tray for KuteTray {
                     .into(),
                 );
                 items.push(MenuItem::Separator);
-                if self.dialogs.is_some() {
+                if self.dialogs().is_some() {
                     for detail in Detail::ALL {
                         let id = id.clone();
                         items.push(
@@ -437,16 +445,12 @@ impl Tray {
         store: Store,
         open: Vec<String>,
     ) -> anyhow::Result<Tray> {
-        let dialogs = Dialogs::find();
-        if dialogs.is_none() {
-            eprintln!("kute: neither kdialog nor zenity found; the tray can't ask for details");
-        }
         let tray = KuteTray {
             view: starting(),
             actions,
             store,
             open,
-            dialogs,
+            dialog_path: None,
         };
         let handle = tray
             .assume_sni_available(true)
@@ -533,7 +537,7 @@ mod tests {
             actions: tx,
             store: Store::open(std::env::temp_dir().join("kute-tray-unused")).unwrap(),
             open: Vec::new(),
-            dialogs: None,
+            dialog_path: Some(std::ffi::OsString::new()),
         };
         (tray, rx)
     }
@@ -656,7 +660,7 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, MenuItem::Standard(s) if s.label == hint))
         );
-        t.dialogs = Dialogs::find_in(bin.as_os_str());
+        t.dialog_path = Some(bin.clone().into_os_string());
         click(&mut t, "Who else is on the call…");
         let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert_eq!(
