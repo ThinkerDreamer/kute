@@ -1,6 +1,7 @@
 //! `meta.toml`: everything about a session except audio and text.
 
 use super::Track;
+use crate::config::Labels;
 use crate::time;
 use jiff::Zoned;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,10 @@ pub struct Meta {
     /// Free text for the summarizer, e.g. who the other speakers are (`kute notes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Who the others are, e.g. "Jordan" or "Jordan, Sam" (`kute others`): their track's
+    /// label in this session's transcript and summary prompt, in place of `labels.others`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub others_name: Option<String>,
     pub kute_version: String,
     pub started_at: Zoned,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +240,7 @@ impl Meta {
             id,
             title: None,
             notes: None,
+            others_name: None,
             kute_version: env!("CARGO_PKG_VERSION").to_string(),
             started_at,
             ended_at: None,
@@ -250,6 +256,17 @@ impl Meta {
             open_conversation_ms: None,
             compression: Compression::default(),
         }
+    }
+
+    /// The config's labels, with this session's name for the others if it has one.
+    pub fn labels(&self, config: &Labels) -> Labels {
+        let mut labels = config.clone();
+        if let Some(name) = self.others_name.as_deref().map(str::trim)
+            && !name.is_empty()
+        {
+            labels.others = name.to_string();
+        }
+        labels
     }
 
     pub fn duration_ms(&self) -> Option<u64> {

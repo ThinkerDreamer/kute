@@ -17,7 +17,7 @@ Durations are written as strings such as `"20s"`, `"5m"` or `"1h 30m"`.
 | Key | Default | |
 |---|---|---|
 | `me` | `"Me"` | Label for your microphone in transcripts. |
-| `others` | `"Others"` | Label for everyone else (the system audio). |
+| `others` | `"Others"` | Label for everyone else (the system audio). A session can name them instead (`kute others`, or the tray). |
 
 ## `[storage]`
 
@@ -136,7 +136,7 @@ A daemon started by systemd doesn't inherit your shell's environment: see
 
 | Key | Default | |
 |---|---|---|
-| `enabled` | `true` | Show the tray icon. Its menu records, stops, turns call detection off and on, and opens the recordings folder. It needs a StatusNotifierItem host: KDE Plasma, most other panels, or the AppIndicator extension on GNOME. |
+| `enabled` | `true` | Show the tray icon. Its menu records, stops, turns call detection off and on, and opens the recordings folder. While a call is recorded, it asks for the call's title, who else is on it, its languages and notes in a dialog, which needs `kdialog` or `zenity`. It needs a StatusNotifierItem host: KDE Plasma, most other panels, or the AppIndicator extension on GNOME. |
 
 ## A complete example
 

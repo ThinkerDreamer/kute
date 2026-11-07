@@ -462,7 +462,7 @@ const GRAPHICAL: &[&str] = &[
 
 /// The desktop's variables from the systemd user manager, which the desktop session updates
 /// when it starts. Empty when systemd can't be asked.
-fn graphical_env() -> Vec<(String, String)> {
+pub fn graphical_env() -> Vec<(String, String)> {
     let output = Command::new("systemctl")
         .args(["--user", "show-environment"])
         .output();

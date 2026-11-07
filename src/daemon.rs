@@ -231,6 +231,14 @@ impl Daemon {
     /// notification's buttons.
     fn tray(&mut self, action: TrayAction, now_ms: u64) {
         let (request, id) = match action {
+            // The session's details, typed in while it records (or since it stopped).
+            TrayAction::Edit(job) => {
+                eprintln!("kute: {job} (from the tray)");
+                if let Err(e) = self.enqueue(job) {
+                    eprintln!("kute: {e:#}");
+                }
+                return;
+            }
             TrayAction::Record => (Request::Record { title: None }, None),
             TrayAction::Stop(id) => (Request::Stop, Some(id)),
             TrayAction::Discard(id) => (Request::Discard, Some(id)),
@@ -405,7 +413,12 @@ impl Daemon {
     /// the conversations that prompted the second.
     fn enqueue(&mut self, job: Job) -> Result<()> {
         let covered = matches!(job, Job::Process { .. }) && self.queue.contains(&job);
-        if !covered {
+        if job.edits_details() {
+            // Quick, and the languages must be set before the session's next conversation
+            // is transcribed: ahead of all but earlier edits.
+            let at = self.queue.iter().take_while(|j| j.edits_details()).count();
+            self.queue.insert(at, job);
+        } else if !covered {
             self.queue.push_back(job);
         }
         self.start_next()
@@ -589,7 +602,7 @@ pub fn run(store: Store, config: Config) -> Result<()> {
     let tray = if config.tray.enabled {
         let (tray_tx, tray_rx) = mpsc::channel();
         forward(tray_rx, &events_tx, Event::Tray);
-        Tray::spawn(tray_tx, store.sessions_dir(), config.notify.open.clone())
+        Tray::spawn(tray_tx, store.clone(), config.notify.open.clone())
             .inspect_err(|e| eprintln!("kute: no tray icon: {e:#}"))
             .ok()
     } else {

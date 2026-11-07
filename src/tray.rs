@@ -1,19 +1,24 @@
 //! The tray icon (a StatusNotifierItem, through `ksni`): shows whether kute is listening,
 //! recording or paused and what it is working on, and offers Record / Stop / Discard,
+//! the call's details (title, who else is on it, languages, notes; through `dialog`),
 //! Detect calls on and off, and the recordings folder.
 //!
 //! The daemon sends it each new `Status`; its menu sends `TrayAction`s back.
 
 use crate::detect::Phase;
+use crate::dialog::{Ask, Dialogs};
 use crate::ipc::Status;
+use crate::jobs::Job;
+use crate::store::{LanguageChange, Meta, Store, Track};
+use crate::transcribe::parse_languages;
+use anyhow::Result;
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip};
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 /// What the tray's menu asks the daemon to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TrayAction {
     Record,
     /// Stop the session the menu was shown for, if it is still the one recording.
@@ -22,6 +27,126 @@ pub enum TrayAction {
     Discard(String),
     Pause,
     Resume,
+    /// Change a session's details (title, others' name, languages, notes).
+    Edit(Job),
+}
+
+/// A detail of the call the menu lets you type in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Title,
+    Others,
+    Languages,
+    Notes,
+}
+
+impl Detail {
+    const ALL: [Detail; 4] = [
+        Detail::Title,
+        Detail::Others,
+        Detail::Languages,
+        Detail::Notes,
+    ];
+
+    fn menu_label(self) -> &'static str {
+        match self {
+            Detail::Title => "Title…",
+            Detail::Others => "Who else is on the call…",
+            Detail::Languages => "Languages…",
+            Detail::Notes => "Notes for the summary…",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Detail::Title => "edit-rename",
+            Detail::Others => "system-users",
+            Detail::Languages => "preferences-desktop-locale",
+            Detail::Notes => "document-edit",
+        }
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Detail::Title => "The call's title:",
+            Detail::Others => {
+                "Who else is on the call, e.g. Jordan or Jordan, Sam.\n\
+                 The transcript labels their track with it. Empty: the usual label."
+            }
+            Detail::Languages => {
+                "Languages spoken, e.g. ru, or ru,en to pick between them; auto for any.\n\
+                 Per track, yours then theirs: ru / ru,en. Empty: from the config."
+            }
+            Detail::Notes => {
+                "Notes the summary follows: who the speakers are, what to focus on, tone."
+            }
+        }
+    }
+
+    /// What the dialog shows at first.
+    pub fn current(self, meta: &Meta) -> String {
+        match self {
+            Detail::Title => meta.title.clone().unwrap_or_default(),
+            Detail::Others => meta.others_name.clone().unwrap_or_default(),
+            Detail::Notes => meta.notes.clone().unwrap_or_default(),
+            Detail::Languages => {
+                let me = meta.transcribe.for_track(Track::Me);
+                let others = meta.transcribe.for_track(Track::Others);
+                if me == others {
+                    me.join(",")
+                } else {
+                    let show = |codes: &[String]| match codes {
+                        [] => "default".to_string(),
+                        codes => codes.join(","),
+                    };
+                    format!("{} / {}", show(me), show(others))
+                }
+            }
+        }
+    }
+
+    /// The job that sets what was typed; `None` when there is nothing to change (an empty
+    /// title: a session can't lose its title).
+    pub fn job(self, id: &str, text: &str) -> Result<Option<Job>> {
+        let id = id.to_string();
+        let text = text.trim();
+        let optional = (!text.is_empty()).then(|| text.to_string());
+        Ok(Some(match self {
+            Detail::Title => match optional {
+                Some(title) => Job::Title { id, title },
+                None => return Ok(None),
+            },
+            Detail::Others => Job::Others { id, name: optional },
+            Detail::Notes => Job::Notes {
+                id,
+                notes: optional,
+            },
+            Detail::Languages => Job::Language {
+                id,
+                languages: language_change(text)?,
+            },
+        }))
+    }
+}
+
+/// `ru,en` for both tracks, `ru / ru,en` for mine and theirs (`default` or nothing: the
+/// config's), nothing at all for the config's on both.
+fn language_change(text: &str) -> Result<LanguageChange> {
+    let parse = |part: &str| match part.trim() {
+        "" | "default" => Ok(Vec::new()),
+        codes => parse_languages(codes),
+    };
+    Ok(match text.split_once('/') {
+        Some((me, others)) => LanguageChange {
+            all: Some(Vec::new()),
+            me: Some(parse(me)?),
+            others: Some(parse(others)?),
+        },
+        None => LanguageChange {
+            all: Some(parse(text)?),
+            ..LanguageChange::default()
+        },
+    })
 }
 
 /// What the tray shows for a status.
@@ -96,14 +221,56 @@ pub fn view(status: &Status) -> View {
 pub struct KuteTray {
     view: View,
     actions: Sender<TrayAction>,
-    sessions_dir: PathBuf,
+    store: Store,
     open: Vec<String>,
+    /// What asks for the call's details; `None` without kdialog or zenity.
+    dialogs: Option<Dialogs>,
 }
 
 impl KuteTray {
     fn send(&self, action: TrayAction) {
         // The daemon is shutting down if this fails; nothing to do about it here.
         let _ = self.actions.send(action);
+    }
+
+    /// Asks for one of the session's details in a dialog, on a thread of its own: the menu
+    /// must not wait for it. The answer goes to the daemon even if the call has ended by
+    /// then; it is the same session.
+    fn edit(&self, id: String, detail: Detail) {
+        let Some(dialogs) = self.dialogs.clone() else {
+            return;
+        };
+        let (store, actions) = (self.store.clone(), self.actions.clone());
+        std::thread::spawn(move || {
+            let meta = match store.resolve(&id).and_then(|s| s.load_meta()) {
+                Ok(meta) => meta,
+                Err(e) => return eprintln!("kute: can't edit {id}: {e:#}"),
+            };
+            let label = detail.menu_label().trim_end_matches('…');
+            let title = format!("kute: {label}");
+            let current = detail.current(&meta);
+            let ask = Ask {
+                title: &title,
+                prompt: detail.prompt(),
+                value: &current,
+                multiline: detail == Detail::Notes,
+            };
+            let text = match dialogs.ask(&ask) {
+                Ok(Some(text)) => text,
+                Ok(None) => return,
+                Err(e) => return eprintln!("kute: {e:#}"),
+            };
+            if text.trim() == current.trim() {
+                return;
+            }
+            match detail.job(&id, &text) {
+                Ok(Some(job)) => {
+                    let _ = actions.send(TrayAction::Edit(job));
+                }
+                Ok(None) => {}
+                Err(e) => dialogs.error(&title, &format!("{e:#}")),
+            }
+        });
     }
 }
 
@@ -177,6 +344,25 @@ impl ksni::Tray for KuteTray {
                     }
                     .into(),
                 );
+                items.push(MenuItem::Separator);
+                if self.dialogs.is_some() {
+                    for detail in Detail::ALL {
+                        let id = id.clone();
+                        items.push(
+                            StandardItem {
+                                label: detail.menu_label().into(),
+                                icon_name: detail.icon().into(),
+                                activate: Box::new(move |t: &mut Self| t.edit(id.clone(), detail)),
+                                ..Default::default()
+                            }
+                            .into(),
+                        );
+                    }
+                } else {
+                    items.push(label(
+                        "Install kdialog or zenity to type in the call's details",
+                    ));
+                }
             }
             None => items.push(
                 StandardItem {
@@ -209,7 +395,7 @@ impl ksni::Tray for KuteTray {
                 label: "Open recordings folder".into(),
                 icon_name: "folder-open".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let (open, dir) = (t.open.clone(), t.sessions_dir.clone());
+                    let (open, dir) = (t.open.clone(), t.store.sessions_dir());
                     // Opening waits for the program; the menu must not.
                     std::thread::spawn(move || crate::notify::open_with(&open, &dir));
                 }),
@@ -248,14 +434,19 @@ impl Tray {
     /// starts. Fails only without a D-Bus session bus.
     pub fn spawn(
         actions: Sender<TrayAction>,
-        sessions_dir: PathBuf,
+        store: Store,
         open: Vec<String>,
     ) -> anyhow::Result<Tray> {
+        let dialogs = Dialogs::find();
+        if dialogs.is_none() {
+            eprintln!("kute: neither kdialog nor zenity found; the tray can't ask for details");
+        }
         let tray = KuteTray {
             view: starting(),
             actions,
-            sessions_dir,
+            store,
             open,
+            dialogs,
         };
         let handle = tray
             .assume_sni_available(true)
@@ -340,10 +531,141 @@ mod tests {
         let tray = KuteTray {
             view: view(status),
             actions: tx,
-            sessions_dir: PathBuf::new(),
+            store: Store::open(std::env::temp_dir().join("kute-tray-unused")).unwrap(),
             open: Vec::new(),
+            dialogs: None,
         };
         (tray, rx)
+    }
+
+    fn meta() -> Meta {
+        Meta::new(
+            "2026-11-07T101500".into(),
+            "2026-11-07T10:15:00+01:00[+01:00]".parse().unwrap(),
+            crate::store::Trigger {
+                kind: crate::store::TriggerKind::Manual,
+                app_name: None,
+                binary: None,
+            },
+            "auto".into(),
+        )
+    }
+
+    #[test]
+    fn languages_show_one_list_or_mine_and_theirs() {
+        let mut m = meta();
+        assert_eq!(Detail::Languages.current(&m), "");
+        m.transcribe.languages = vec!["ru".into(), "en".into()];
+        assert_eq!(Detail::Languages.current(&m), "ru,en");
+        m.transcribe.me = vec!["ru".into()];
+        assert_eq!(Detail::Languages.current(&m), "ru / ru,en");
+        m.transcribe.languages.clear();
+        assert_eq!(Detail::Languages.current(&m), "ru / default");
+    }
+
+    #[test]
+    fn typed_languages_become_a_change() {
+        let change = |text: &str| match Detail::Languages.job("s", text).unwrap() {
+            Some(Job::Language { languages, .. }) => languages,
+            other => panic!("{other:?}"),
+        };
+        let codes = |c: &[&str]| Some(c.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            change("ru, en"),
+            LanguageChange {
+                all: codes(&["ru", "en"]),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            change("ru / default"),
+            LanguageChange {
+                all: codes(&[]),
+                me: codes(&["ru"]),
+                others: codes(&[]),
+            }
+        );
+        // Round trip: what `current` shows sets the same languages again.
+        let mut m = meta();
+        change("ru / ru,en").apply(&mut m.transcribe);
+        assert_eq!(Detail::Languages.current(&m), "ru / ru,en");
+        assert_eq!(
+            change(""),
+            LanguageChange {
+                all: codes(&[]),
+                ..Default::default()
+            }
+        );
+        assert!(Detail::Languages.job("s", "klingon").is_err());
+    }
+
+    #[test]
+    fn an_empty_answer_clears_all_but_the_title() {
+        assert_eq!(Detail::Title.job("s", "  ").unwrap(), None);
+        assert_eq!(
+            Detail::Title.job("s", " Standup ").unwrap(),
+            Some(Job::Title {
+                id: "s".into(),
+                title: "Standup".into()
+            })
+        );
+        assert_eq!(
+            Detail::Others.job("s", "").unwrap(),
+            Some(Job::Others {
+                id: "s".into(),
+                name: None
+            })
+        );
+        assert_eq!(
+            Detail::Notes.job("s", "").unwrap(),
+            Some(Job::Notes {
+                id: "s".into(),
+                notes: None
+            })
+        );
+    }
+
+    #[test]
+    fn the_menu_asks_for_a_detail_and_sends_the_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let mut m = meta();
+        let session = store.create_session(&m.started_at).unwrap();
+        m.id = session.id.clone();
+        m.others_name = Some("Jordan".into());
+        session.save_meta(&m).unwrap();
+        // A kdialog that appends to the name it was shown.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let kdialog = bin.join("kdialog");
+        std::fs::write(
+            &kdialog,
+            "#!/bin/sh\nfor a; do last=\"$a\"; done; echo \"$last, Sam\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&kdialog, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut s = status(Phase::Recording);
+        s.session = Some(session.id.clone());
+        let (mut t, rx) = tray(&s);
+        t.store = store;
+        let hint = "Install kdialog or zenity to type in the call's details";
+        assert!(
+            t.menu()
+                .iter()
+                .any(|i| matches!(i, MenuItem::Standard(s) if s.label == hint))
+        );
+        t.dialogs = Dialogs::find_in(bin.as_os_str());
+        click(&mut t, "Who else is on the call…");
+        let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            got,
+            TrayAction::Edit(Job::Others {
+                id: session.id.clone(),
+                name: Some("Jordan, Sam".into())
+            })
+        );
     }
 
     /// Activates the menu item with this label, as a click would.

@@ -50,6 +50,11 @@ pub enum Job {
         id: String,
         notes: Option<String>,
     },
+    /// Who the others are; `None` goes back to `labels.others` from the config.
+    Others {
+        id: String,
+        name: Option<String>,
+    },
     /// The languages spoken in a session.
     Language {
         id: String,
@@ -59,6 +64,15 @@ pub enum Job {
 }
 
 impl Job {
+    /// Changes only what the session is called and how to treat it: no audio work, so it
+    /// runs ahead of transcriptions waiting in the queue.
+    pub fn edits_details(&self) -> bool {
+        matches!(
+            self,
+            Job::Title { .. } | Job::Notes { .. } | Job::Others { .. } | Job::Language { .. }
+        )
+    }
+
     /// The session the job works on; `None` for an import (its session doesn't exist yet)
     /// and a reindex.
     pub fn session(&self) -> Option<&str> {
@@ -68,6 +82,7 @@ impl Job {
             | Job::Summarize { id, .. }
             | Job::Title { id, .. }
             | Job::Notes { id, .. }
+            | Job::Others { id, .. }
             | Job::Language { id, .. } => Some(id),
             Job::Import { .. } | Job::Reindex => None,
         }
@@ -84,6 +99,7 @@ impl std::fmt::Display for Job {
             Job::Import { me, .. } => write!(f, "import {}", me.display()),
             Job::Title { id, .. } => write!(f, "title {id}"),
             Job::Notes { id, .. } => write!(f, "notes {id}"),
+            Job::Others { id, .. } => write!(f, "others {id}"),
             Job::Language { id, .. } => write!(f, "language {id}"),
             Job::Reindex => f.write_str("reindex"),
         }
@@ -256,6 +272,15 @@ pub fn run(
             let meta = session.update_meta(|m| m.title = Some(title.clone()))?;
             pipeline::write_documents(&session, &meta, &config.labels)?;
             pipeline::index_session(&pipeline::open_index(store)?, &session)?;
+            Ok(outcome(Done::default(), &session))
+        }
+        Job::Others { id, name } => {
+            // The transcript shows the label; summaries already written keep the old one
+            // until the session is summarized again.
+            let session = store.resolve(id)?;
+            let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let meta = session.update_meta(|m| m.others_name = name.map(String::from))?;
+            pipeline::write_documents(&session, &meta, &config.labels)?;
             Ok(outcome(Done::default(), &session))
         }
         Job::Notes { id, notes } => {
@@ -512,6 +537,35 @@ mod tests {
             Some("Jordan is the PM")
         );
         assert_eq!(notes(None), None);
+    }
+
+    #[test]
+    fn an_others_job_names_the_others_track() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let mut m = meta(Vec::new());
+        let session = store.create_session(&m.started_at).unwrap();
+        m.id = session.id.clone();
+        session.save_meta(&m).unwrap();
+        let set = |name: Option<&str>| {
+            let job = Job::Others {
+                id: session.id.clone(),
+                name: name.map(Into::into),
+            };
+            run(&store, &Config::default(), &mut None, &job).unwrap();
+            let meta = session.load_meta().unwrap();
+            (
+                meta.others_name.clone(),
+                meta.labels(&Config::default().labels).others,
+            )
+        };
+        assert_eq!(
+            set(Some(" Jordan, Sam ")),
+            (Some("Jordan, Sam".into()), "Jordan, Sam".into())
+        );
+        assert_eq!(set(Some("  ")), (None, "Others".into()));
+        assert_eq!(set(Some("Jordan")).1, "Jordan");
+        assert_eq!(set(None), (None, "Others".into()));
     }
 
     #[test]

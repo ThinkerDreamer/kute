@@ -100,6 +100,15 @@ enum Command {
         #[arg(long, conflicts_with = "text")]
         clear: bool,
     },
+    /// Name the others on a call, e.g. Jordan or "Jordan, Sam": their label in the
+    /// transcript and the summary (no name: print it)
+    Others {
+        id: String,
+        name: Vec<String>,
+        /// Use `labels.others` from the config again
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+    },
     /// Set the languages spoken in a session, e.g. ru, ru en to pick between them, or auto
     /// (nothing: print them)
     Language {
@@ -351,6 +360,21 @@ pub fn run() -> Result<()> {
                     &Job::Notes {
                         id: session.id,
                         notes: (!clear).then(|| text.join(" ")),
+                    },
+                )?;
+            }
+        }
+        Command::Others { id, name, clear } => {
+            let session = store.resolve(&id)?;
+            if name.is_empty() && !clear {
+                println!("{}", session.load_meta()?.labels(&config.labels).others);
+            } else {
+                run_job(
+                    &store,
+                    &config,
+                    &Job::Others {
+                        id: session.id,
+                        name: (!clear).then(|| name.join(" ")),
                     },
                 )?;
             }

@@ -23,7 +23,7 @@ With the default config, nothing but the model downloads:
   - `anthropic`: Anthropic's API.
 
   The prompt also includes the date, the call app, the session title, the session's notes
-  (`kute notes`) and your configured name.
+  (`kute notes`), the others' name (`kute others`) and your configured name.
 
 kute has no telemetry, update checks or crash reporting.
 

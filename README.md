@@ -92,7 +92,9 @@ unit you wrote by hand.
 Then just take calls. While one is recorded, a notification "Recording: <app>" offers Stop and
 Discard, and the tray icon turns into a red dot. When a summary is ready, a notification shows
 its first line; click it to open `summary.md`. The tray icon's menu records, stops, turns call
-detection off and on, and opens the recordings folder. From a terminal:
+detection off and on, and opens the recordings folder. While a call is recorded, it also asks for
+the call's title, who else is on it, its languages and notes for the summary, in a small dialog
+(kdialog, or zenity where there is no kdialog). From a terminal:
 
 ```bash
 kute status                 # idle, recording, ...; the current session; the queue
@@ -133,6 +135,15 @@ kute notes last "Others: Jordan (PM, asks about dates), Sam (backend). Keep it s
 kute notes last             # print them
 kute notes last --clear
 kute summarize last         # summarize again with them
+```
+
+Name the others, and the transcript labels their track with the name instead of "Others" (and
+the summary prompt says who that is):
+
+```bash
+kute others last Jordan          # or "Jordan, Sam"
+kute others last                 # print the label
+kute others last --clear         # back to labels.others from the config
 ```
 
 When Whisper hears languages that aren't there (say, parts of a Russian lesson as another

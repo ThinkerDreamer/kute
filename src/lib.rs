@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod detect;
+pub mod dialog;
 pub mod doctor;
 pub mod import;
 pub mod index;

@@ -285,7 +285,7 @@ impl Pipeline<'_> {
             self.quiet,
             &format!("{}: summarizing conversation {n}", meta.id),
         );
-        let labels = &self.config.labels;
+        let labels = &meta.labels(&self.config.labels);
         let ctx = PromptContext {
             date: meta.started_at.strftime("%Y-%m-%d").to_string(),
             time_range: render::time_range(meta, &conv),
@@ -437,6 +437,7 @@ impl Drop for AudioSource {
 
 /// Rewrites `transcript.md` and `summary.md` from the session's current state.
 pub fn write_documents(session: &Session, meta: &Meta, labels: &Labels) -> Result<()> {
+    let labels = &meta.labels(labels);
     let me = session.load_track(Track::Me)?;
     let others = session.load_track(Track::Others)?;
     write_atomic(

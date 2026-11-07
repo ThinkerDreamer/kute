@@ -14,6 +14,7 @@ use kute::notify::Click;
 use kute::pw::{App, MonitorEvent, Snapshot, Source, Stream, StreamKind};
 use kute::store::{Meta, SessionState, Stage, Step, Store, Track, Trigger, TriggerKind};
 use kute::testing::{FakeSource, RecordingNotifier, run_vad};
+use kute::tray::TrayAction;
 use kute::worker::{WorkerDone, WorkerMsg};
 use std::io::Write;
 use std::sync::mpsc::{self, Receiver};
@@ -392,6 +393,34 @@ fn a_process_job_is_queued_once() {
         });
     }
     assert_eq!(h.daemon.status().queued, 1);
+}
+
+#[test]
+fn detail_edits_go_ahead_of_processing_in_the_order_given() {
+    let mut h = Harness::new();
+    h.ok(Request::Job { job: Job::Reindex });
+    h.ok(Request::Job {
+        job: Job::Process { id: "s1".into() },
+    });
+    let title = Job::Title {
+        id: "s2".into(),
+        title: "Lesson".into(),
+    };
+    let others = Job::Others {
+        id: "s2".into(),
+        name: Some("Jordan".into()),
+    };
+    h.ok(Request::Job { job: title.clone() });
+    h.daemon
+        .handle(Event::Tray(TrayAction::Edit(others.clone())), h.now)
+        .unwrap();
+    assert_eq!(h.sent(), vec![Job::Reindex]);
+    h.done(Job::Reindex, None, None);
+    assert_eq!(h.sent(), vec![title.clone()]);
+    h.done(title, Some("s2"), None);
+    assert_eq!(h.sent(), vec![others.clone()]);
+    h.done(others, Some("s2"), None);
+    assert_eq!(h.sent(), vec![Job::Process { id: "s1".into() }]);
 }
 
 #[test]
