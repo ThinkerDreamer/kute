@@ -2,7 +2,7 @@
 //! summarization never share the GPU.
 
 use crate::config::Config;
-use crate::jobs::{self, ConversationsFailed, Job, Outcome};
+use crate::jobs::{self, ConversationsFailed, Job, Outcome, Problems};
 use crate::pipeline::WhisperProvider;
 use crate::store::{SessionState, Store};
 use anyhow::Result;
@@ -25,6 +25,8 @@ pub struct WorkerDone {
     /// The session the job worked on, when it got as far as having one: an `Import`'s
     /// retry processes the session it created.
     pub session: Option<String>,
+    /// What the job left failed, whether or not it returned an error.
+    pub problems: Problems,
 }
 
 /// Starts the worker. It runs jobs until `Shutdown`, or until either channel closes. The
@@ -71,6 +73,7 @@ fn spawn_with(
                     }
                 }
                 let session = session_of(&result);
+                let problems = problems_of(&result);
                 let retry_after = session
                     .as_deref()
                     .and_then(|id| retry_after(&store, &job, id));
@@ -79,6 +82,7 @@ fn spawn_with(
                     result: result.map_err(|e| format!("{e:#}")),
                     retry_after,
                     session,
+                    problems,
                 };
                 if done.send(done_msg).is_err() {
                     break;
@@ -109,6 +113,17 @@ fn session_of(result: &Result<Outcome>) -> Option<String> {
     match result {
         Ok(outcome) => outcome.session.clone(),
         Err(e) => Some(e.downcast_ref::<ConversationsFailed>()?.session.clone()),
+    }
+}
+
+/// What a job's result left failed: its outcome's problems, or the failed conversations'.
+fn problems_of(result: &Result<Outcome>) -> Problems {
+    match result {
+        Ok(outcome) => outcome.problems.clone(),
+        Err(e) => e
+            .downcast_ref::<ConversationsFailed>()
+            .map(|failed| failed.problems.clone())
+            .unwrap_or_default(),
     }
 }
 

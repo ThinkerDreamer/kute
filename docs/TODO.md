@@ -148,3 +148,13 @@ that.
 - [ ] **Publish**: add an SSH key to the AUR account, `git clone
   ssh://aur@aur.archlinux.org/kute.git`, commit `PKGBUILD` and `.SRCINFO` (regenerate it with
   `makepkg --printsrcinfo > .SRCINFO` on every change), push to `master`.
+
+## From plan 4a
+
+- [ ] **Notification buttons vanish in the KDE history.** Plasma drops the actions of a
+  notification once it leaves the popup, so "Open summary" can't be clicked from the history.
+  A resident note keeps them but stays on screen; an XDG portal `OpenURI` call wouldn't help
+  either, since the click never reaches kute.
+- [ ] **No activation token for the opener.** The notification server sends one with the click
+  (`ActivationToken`, spec 1.2), but notify-rust doesn't pass it on, so on Wayland the editor may
+  open behind other windows. Set `XDG_ACTIVATION_TOKEN` for the child once it's available.

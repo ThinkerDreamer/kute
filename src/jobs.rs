@@ -5,7 +5,7 @@ use crate::config::{Config, SummaryBackend};
 use crate::import::{self, ImportRequest};
 use crate::index::Index;
 use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
-use crate::store::{LanguageChange, Meta, Session, Stage, Step, Store};
+use crate::store::{Conversation, LanguageChange, Meta, Session, Stage, Step, Store};
 use crate::summarize;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,23 @@ pub struct Outcome {
     pub session: Option<String>,
     /// Conversations this job wrote a summary for (the daemon announces them).
     pub summarized: Vec<u32>,
+    /// What went wrong without failing the job (a compression error).
+    pub problems: Problems,
+}
+
+/// What went wrong in a pipeline run, for the daemon to announce.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Problems {
+    /// Conversations this run left failed; `meta.toml` says at which step and why.
+    pub conversations: Vec<u32>,
+    /// Why compressing the audio failed (the WAVs are kept).
+    pub compression: Option<String>,
+}
+
+impl Problems {
+    pub fn is_empty(&self) -> bool {
+        self.conversations.is_empty() && self.compression.is_none()
+    }
 }
 
 /// The error a job returns when the pipeline left conversations failed. It carries the
@@ -104,7 +121,7 @@ pub struct Outcome {
 #[derive(Debug)]
 pub struct ConversationsFailed {
     pub session: String,
-    pub count: usize,
+    pub problems: Problems,
     /// Where the transcript and summary of the rest are, as `kute process` prints them on
     /// success. Left to the caller, since the daemon's stdout goes nowhere.
     pub written: Vec<String>,
@@ -115,7 +132,8 @@ impl std::fmt::Display for ConversationsFailed {
         write!(
             f,
             "{} conversation(s) failed; fix the cause and run `kute process {}`",
-            self.count, self.session
+            self.problems.conversations.len(),
+            self.session
         )
     }
 }
@@ -217,7 +235,7 @@ pub fn run(
             }
             let mut done = Done {
                 message: format!("imported {}", session.id),
-                summarized: Vec::new(),
+                ..Done::default()
             };
             if *process {
                 let provider = provider(asr, config, store)?;
@@ -229,6 +247,7 @@ pub fn run(
                     done.message = format!("{}\n{}", done.message, processed.message);
                 }
                 done.summarized = processed.summarized;
+                done.compression = processed.compression;
             }
             Ok(outcome(done, &session))
         }
@@ -286,15 +305,26 @@ pub fn run(
 pub fn retry_delay(meta: &Meta) -> Option<Duration> {
     meta.conversations
         .iter()
-        .filter(|c| c.stage == Stage::Failed && c.failed_step == Some(Step::Transcribe))
-        .filter_map(|c| match c.attempts {
-            1 => Some(60),
-            2 => Some(5 * 60),
-            3 => Some(30 * 60),
-            _ => None,
-        })
+        .filter_map(conversation_retry)
         .min()
-        .map(Duration::from_secs)
+}
+
+/// Whether the daemon will transcribe this failed conversation again on its own.
+pub fn retries_left(c: &Conversation) -> bool {
+    conversation_retry(c).is_some()
+}
+
+fn conversation_retry(c: &Conversation) -> Option<Duration> {
+    if c.stage != Stage::Failed || c.failed_step != Some(Step::Transcribe) {
+        return None;
+    }
+    let secs = match c.attempts {
+        1 => 60,
+        2 => 5 * 60,
+        3 => 30 * 60,
+        _ => return None,
+    };
+    Some(Duration::from_secs(secs))
 }
 
 fn provider<'a>(
@@ -313,6 +343,7 @@ fn provider<'a>(
 struct Done {
     message: String,
     summarized: Vec<u32>,
+    compression: Option<String>,
 }
 
 fn outcome(done: Done, session: &Session) -> Outcome {
@@ -320,6 +351,10 @@ fn outcome(done: Done, session: &Session) -> Outcome {
         message: done.message,
         session: Some(session.id.clone()),
         summarized: done.summarized,
+        problems: Problems {
+            conversations: Vec::new(),
+            compression: done.compression,
+        },
     }
 }
 
@@ -355,7 +390,8 @@ fn run_pipeline(
     };
     Ok(Done {
         message: check_report(session, &report)?,
-        summarized: report.summarized,
+        summarized: report.summarized.clone(),
+        compression: report.compression_error.clone(),
     })
 }
 
@@ -379,7 +415,10 @@ fn check_report(session: &Session, report: &Report) -> Result<String> {
         }
         return Err(ConversationsFailed {
             session: session.id.clone(),
-            count: report.failed.len(),
+            problems: Problems {
+                conversations: report.failed.iter().map(|(n, _)| *n).collect(),
+                compression: report.compression_error.clone(),
+            },
             written: lines,
         }
         .into());
@@ -618,7 +657,10 @@ mod tests {
     fn conversations_failed_survives_the_import_context() {
         let err = anyhow::Error::from(ConversationsFailed {
             session: "s".into(),
-            count: 1,
+            problems: Problems {
+                conversations: vec![1],
+                compression: None,
+            },
             written: Vec::new(),
         })
         .context("imported s");

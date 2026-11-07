@@ -130,7 +130,7 @@ A daemon started by systemd doesn't inherit your shell's environment: see
 
 | Key | Default | |
 |---|---|---|
-| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification. The file's path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
+| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure notification. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
 
 ## A complete example
 

@@ -109,18 +109,29 @@ impl Write for FakeWriter {
     }
 }
 
-/// A `Notifier` that keeps every note, for tests.
+/// A `Notifier` that keeps every note and every withdrawn key, for tests.
 #[derive(Clone, Default)]
-pub struct RecordingNotifier(pub std::sync::Arc<std::sync::Mutex<Vec<crate::notify::Note>>>);
+pub struct RecordingNotifier {
+    notes: std::sync::Arc<std::sync::Mutex<Vec<crate::notify::Note>>>,
+    withdrawn: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
 
 impl RecordingNotifier {
     pub fn notes(&self) -> Vec<crate::notify::Note> {
-        self.0.lock().unwrap().clone()
+        self.notes.lock().unwrap().clone()
+    }
+
+    pub fn withdrawn(&self) -> Vec<String> {
+        self.withdrawn.lock().unwrap().clone()
     }
 }
 
 impl crate::notify::Notifier for RecordingNotifier {
     fn notify(&self, note: crate::notify::Note) {
-        self.0.lock().unwrap().push(note);
+        self.notes.lock().unwrap().push(note);
+    }
+
+    fn withdraw(&self, key: &str) {
+        self.withdrawn.lock().unwrap().push(key.to_string());
     }
 }

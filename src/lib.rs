@@ -18,6 +18,7 @@ pub mod pipeline;
 pub mod pw;
 pub mod recorder;
 pub mod render;
+pub mod service;
 pub mod split;
 pub mod store;
 pub mod summarize;

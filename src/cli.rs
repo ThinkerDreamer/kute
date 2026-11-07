@@ -8,6 +8,7 @@ use crate::jobs::{self, ConversationsFailed, Job};
 use crate::models;
 use crate::pipeline;
 use crate::render;
+use crate::service;
 use crate::store::{LanguageChange, SessionState, Store, Track};
 use crate::time;
 use crate::transcribe::parse_languages;
@@ -140,6 +141,26 @@ enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Run the daemon at login, as a systemd user service
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Write the systemd user unit for this kute binary, enable it and start it
+    Install {
+        /// Replace a kute.service written by hand (kept as kute.service.bak)
+        #[arg(long)]
+        force: bool,
+        /// Print the unit instead of installing it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Stop and disable the service, and remove the unit kute wrote
+    Uninstall,
 }
 
 /// Languages for `retranscribe` and `import`, saved in meta.toml (see `kute language`).
@@ -207,6 +228,13 @@ impl From<BackendArg> for SummaryBackend {
 pub fn run() -> Result<()> {
     whisper_rs::install_logging_hooks();
     let cli = Cli::parse();
+    // The service needs neither the config nor the store, and must work when they don't.
+    if let Command::Service { command } = &cli.command {
+        return match command {
+            ServiceCommand::Install { force, print } => service::install(*force, *print),
+            ServiceCommand::Uninstall => service::uninstall(),
+        };
+    }
     let config = Config::load(cli.config.as_deref())?;
     let store = Store::open(config.data_dir()?)?;
 
@@ -364,6 +392,7 @@ pub fn run() -> Result<()> {
             },
         )?,
         Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
+        Command::Service { .. } => unreachable!("handled before the config is loaded"),
         Command::Model {
             command: ModelCommand::List,
         } => model_list(&store, &config),

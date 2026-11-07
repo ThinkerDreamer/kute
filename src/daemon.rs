@@ -11,7 +11,7 @@ use crate::ipc::{self, Incoming, Request, Response, Status};
 use crate::jobs::Job;
 use crate::live::{self, LiveSession, StartRequest};
 use crate::models;
-use crate::notify::{self, Desktop, Notifier, Silent};
+use crate::notify::{self, Click, Desktop, Notifier, Silent};
 use crate::pipeline;
 use crate::pw::{self, App, MonitorEvent, Snapshot};
 use crate::recorder::VadFactory;
@@ -36,6 +36,8 @@ pub enum Event {
     Monitor(MonitorEvent),
     Ipc(Incoming),
     Worker(WorkerDone),
+    /// A notification's Stop or Discard button.
+    Click(Click),
     Tick,
 }
 
@@ -84,7 +86,7 @@ impl Daemon {
         }
     }
 
-    /// Where announcements go (a summary is ready). Silent unless set.
+    /// Where announcements go (recording, a summary is ready, a failure). Silent unless set.
     pub fn with_notifier(mut self, notifier: Box<dyn Notifier>) -> Daemon {
         self.notifier = notifier;
         self
@@ -108,6 +110,10 @@ impl Daemon {
                 Ok(())
             }
             Event::Worker(done) => self.done(done, now_ms),
+            Event::Click(click) => {
+                self.click(click, now_ms);
+                Ok(())
+            }
         }
     }
 
@@ -152,7 +158,7 @@ impl Daemon {
             }
             if let Some(reason) = failed {
                 eprintln!("kute: {id}: ending the session: {reason}");
-                self.end_failed(has_audio, now_ms)?;
+                self.end_failed(&id, &reason, has_audio, now_ms)?;
             }
         }
         let actions = self.detector.tick(now_ms);
@@ -172,8 +178,15 @@ impl Daemon {
     /// in progress may start a new session (R24), unless the capture died within
     /// `BROKEN_CAPTURE_MS` of starting: pw-record itself is then likely broken, and would
     /// fail the same way every tick. A Tentative session with no audio is discarded.
-    fn end_failed(&mut self, has_audio: bool, now_ms: u64) -> Result<()> {
+    fn end_failed(&mut self, id: &str, reason: &str, has_audio: bool, now_ms: u64) -> Result<()> {
         let discard = self.detector.phase() == Phase::Tentative && !has_audio;
+        let app = self.status().app;
+        self.notifier.notify(notify::recording_failed_note(
+            id,
+            app.as_deref(),
+            reason,
+            !discard,
+        ));
         let early = self
             .detector
             .started_ms()
@@ -194,6 +207,25 @@ impl Daemon {
             }]
         });
         self.apply(actions)
+    }
+
+    /// A notification's Stop or Discard, for the session it was shown for: by the time it is
+    /// clicked, that one may be over and another recording.
+    fn click(&mut self, click: Click, now_ms: u64) {
+        let (request, id) = match click {
+            Click::Stop(id) => (Request::Stop, id),
+            Click::Discard(id) => (Request::Discard, id),
+            Click::OpenSummary(_) | Click::OpenFolder(_) => return,
+        };
+        if self.live_id() != id {
+            eprintln!("kute: {id} is no longer recording; ignoring the notification's button");
+            return;
+        }
+        match self.request(request, now_ms) {
+            Response::Ok { message } => eprintln!("kute: {message} (from the notification)"),
+            Response::Error { message } => eprintln!("kute: {message}"),
+            Response::Status { .. } => {}
+        }
     }
 
     /// Answers a control request. Errors become the reply; the ones that are not just a
@@ -284,6 +316,7 @@ impl Daemon {
         if let Ok(outcome) = &done.result {
             self.announce_summaries(outcome);
         }
+        self.announce_problems(&done);
         let discarded = std::mem::take(&mut self.discarded);
         for id in &discarded {
             unindex(&self.store, id);
@@ -313,6 +346,28 @@ impl Daemon {
             return;
         };
         if let Some(note) = notify::summary_note(&session, &meta, &outcome.summarized) {
+            self.notifier.notify(note);
+        }
+    }
+
+    /// A notification for what a job left failed, once nothing more will happen on its own
+    /// (a transcription with retries left waits for them), or for a job that failed outright.
+    fn announce_problems(&self, done: &WorkerDone) {
+        if done.problems.is_empty() {
+            if let Err(e) = &done.result {
+                self.notifier
+                    .notify(notify::job_failed_note(&done.job.to_string(), e));
+            }
+            return;
+        }
+        let Some(id) = &done.session else { return };
+        let Ok(session) = self.store.session(id) else {
+            return;
+        };
+        let Ok(meta) = session.load_meta() else {
+            return;
+        };
+        if let Some(note) = notify::problems_note(&session, &meta, &done.problems) {
             self.notifier.notify(note);
         }
     }
@@ -354,10 +409,17 @@ impl Daemon {
                     }
                 }
                 Action::Commit => {
-                    let app = self.status().app.unwrap_or_else(|| "manual".into());
-                    eprintln!("kute: recording {} ({app})", self.live_id());
+                    let app = self.status().app;
+                    let id = self.live_id();
+                    eprintln!(
+                        "kute: recording {id} ({})",
+                        app.as_deref().unwrap_or("manual")
+                    );
+                    self.notifier
+                        .notify(notify::recording_note(&id, app.as_deref()));
                 }
                 Action::Finish => {
+                    self.notifier.withdraw(notify::RECORDING);
                     let Some(live) = self.live.take() else {
                         continue;
                     };
@@ -367,6 +429,7 @@ impl Daemon {
                     self.enqueue(Job::Process { id: session.id })?;
                 }
                 Action::Discard => {
+                    self.notifier.withdraw(notify::RECORDING);
                     let Some(live) = self.live.take() else {
                         continue;
                     };
@@ -492,10 +555,12 @@ pub fn run(store: Store, config: Config) -> Result<()> {
             thread::sleep(TICK);
         }
     });
+    let (click_tx, click_rx) = mpsc::channel();
+    forward(click_rx, &events_tx, Event::Click);
     drop(events_tx);
 
     let vad = vad_factory(&store);
-    let desktop = Box::new(Desktop::new(&config.notify));
+    let desktop = Box::new(Desktop::new(&config.notify, store.clone(), click_tx));
     let mut daemon =
         Daemon::new(store, config, Box::new(PwRecord), vad, work_tx).with_notifier(desktop);
     for job in startup {

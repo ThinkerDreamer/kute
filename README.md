@@ -15,8 +15,7 @@ so the transcript knows who said what without guessing:
 
 **Status: early, in daily use by its author.** A background daemon notices when an app opens
 your microphone, records the call, and transcribes and summarizes each conversation as it
-ends. You can also import recordings made elsewhere. Next: a notification while recording, a
-tray icon, and `kute service install`. See
+ends. You can also import recordings made elsewhere. Next: a tray icon and `kute doctor`. See
 [the design](docs/superpowers/specs/2026-10-08-kute-design.md) and [the to-do list](docs/TODO.md).
 
 ## How it works
@@ -78,33 +77,18 @@ Run the daemon. In a terminal to try it out:
 kute daemon
 ```
 
-or as a systemd user service, so it starts when you log in (`kute service install` will
-write this for you; for now, save it as `~/.config/systemd/user/kute.service`, and see
-[Installing](docs/install.md#running-the-daemon-at-login) for API keys):
-
-```ini
-[Unit]
-Description=kute: record, transcribe and summarize calls
-After=pipewire.service wireplumber.service
-Wants=pipewire.service
-
-[Service]
-ExecStart=%h/.cargo/bin/kute daemon
-Restart=on-failure
-RestartSec=5
-# include wherever your summarizer command lives (e.g. ~/.local/bin for claude)
-Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin
-
-[Install]
-WantedBy=default.target
-```
+or as a systemd user service, so it starts when you log in:
 
 ```bash
-systemctl --user enable --now kute
-journalctl --user -u kute -f    # what it's doing
+kute service install               # writes ~/.config/systemd/user/kute.service, enables and starts it
+journalctl --user -u kute -f       # what it's doing
 ```
 
-Then just take calls. When a summary is ready, a notification shows its first line; click it
+See [Installing](docs/install.md#running-the-daemon-at-login) for API keys and for replacing a
+unit you wrote by hand.
+
+Then just take calls. While one is recorded, a notification "Recording: <app>" offers Stop and
+Discard. When a summary is ready, a notification shows its first line; click it
 to open `summary.md`. Control it with:
 
 ```bash

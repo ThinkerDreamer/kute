@@ -8,10 +8,11 @@ use kute::daemon::{Daemon, Event};
 use kute::detect::Phase;
 use kute::index::Index;
 use kute::ipc::{Incoming, Request, Response};
-use kute::jobs::{Job, Outcome};
+use kute::jobs::{Job, Outcome, Problems};
 use kute::merge::Line;
+use kute::notify::Click;
 use kute::pw::{App, MonitorEvent, Snapshot, Source, Stream, StreamKind};
-use kute::store::{Meta, SessionState, Store, Track, Trigger, TriggerKind};
+use kute::store::{Meta, SessionState, Stage, Step, Store, Track, Trigger, TriggerKind};
 use kute::testing::{FakeSource, RecordingNotifier, run_vad};
 use kute::worker::{WorkerDone, WorkerMsg};
 use std::io::Write;
@@ -108,11 +109,33 @@ impl Harness {
             Ok(outcome) => outcome.session.clone(),
             Err(_) => None,
         };
+        let problems = match &result {
+            Ok(outcome) => outcome.problems.clone(),
+            Err(_) => Problems::default(),
+        };
         let done = WorkerDone {
             job,
             result,
             retry_after,
             session,
+            problems,
+        };
+        self.daemon.handle(Event::Worker(done), self.now).unwrap();
+    }
+
+    /// A job that left conversations failed, as the worker reports it.
+    fn failed_conversations(
+        &mut self,
+        id: &str,
+        problems: Problems,
+        retry_after: Option<Duration>,
+    ) {
+        let done = WorkerDone {
+            job: Job::Process { id: id.into() },
+            result: Err(format!("conversations failed in {id}")),
+            retry_after,
+            session: Some(id.into()),
+            problems,
         };
         self.daemon.handle(Event::Worker(done), self.now).unwrap();
     }
@@ -835,7 +858,11 @@ fn a_new_summary_pops_up_a_notification_that_opens_it() {
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert_eq!(notes[0].title, "Summary ready: Element");
     assert_eq!(notes[0].body, "15:15 to 15:22\nA design problem.");
-    assert_eq!(notes[0].open, h.store.session(&id).unwrap().summary_path());
+    assert_eq!(notes[0].default, Some(Click::OpenSummary(id.clone())));
+    assert_eq!(
+        notes[0].buttons,
+        [("Open summary".to_string(), Click::OpenSummary(id))]
+    );
 }
 
 #[test]
@@ -844,12 +871,6 @@ fn jobs_without_new_summaries_stay_quiet() {
     let id = summarized_session(&h.store);
     // Done, but nothing summarized (e.g. a conversation under min_words).
     h.done(Job::Process { id: id.clone() }, Some(&id), None);
-    // Failed.
-    h.finished(
-        Job::Process { id: id.clone() },
-        Err("GPU out of memory".into()),
-        None,
-    );
     // Summarized, but the session is gone (discarded meanwhile).
     let outcome = Outcome {
         session: Some("2020-01-01T000000".into()),
@@ -864,4 +885,133 @@ fn jobs_without_new_summaries_stay_quiet() {
         None,
     );
     assert!(h.notes.notes().is_empty(), "{:?}", h.notes.notes());
+}
+
+#[test]
+fn a_job_that_fails_outright_says_so() {
+    let mut h = Harness::new();
+    let id = summarized_session(&h.store);
+    h.finished(
+        Job::Process { id: id.clone() },
+        Err("the Whisper model is not downloaded".into()),
+        None,
+    );
+    let notes = h.notes.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].title, format!("kute: process {id} failed"));
+    assert_eq!(notes[0].body, "the Whisper model is not downloaded");
+}
+
+/// Marks conversation 1 of `id` failed at `step` after `attempts` tries.
+fn fail_conversation(store: &Store, id: &str, step: Step, attempts: u32) {
+    store
+        .session(id)
+        .unwrap()
+        .update_meta(|m| {
+            let c = m.conversation_mut(1).unwrap();
+            c.stage = Stage::Failed;
+            c.failed_step = Some(step);
+            c.error = Some("GPU out of memory".into());
+            c.attempts = attempts;
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_failed_transcription_is_announced_only_after_its_last_retry() {
+    let mut h = Harness::new();
+    let id = summarized_session(&h.store);
+    let problems = Problems {
+        conversations: vec![1],
+        compression: None,
+    };
+    fail_conversation(&h.store, &id, Step::Transcribe, 3);
+    h.failed_conversations(&id, problems.clone(), Some(Duration::from_secs(1800)));
+    assert!(h.notes.notes().is_empty(), "{:?}", h.notes.notes());
+
+    fail_conversation(&h.store, &id, Step::Transcribe, 4);
+    h.failed_conversations(&id, problems, None);
+    let notes = h.notes.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].title, "Processing failed: Element");
+    assert_eq!(
+        notes[0].body,
+        format!(
+            "15:15 to 15:22, transcription failed after 4 tries: GPU out of memory\n\
+             Run `kute process {id}` once it is fixed."
+        )
+    );
+    assert_eq!(notes[0].default, Some(Click::OpenFolder(id)));
+}
+
+#[test]
+fn a_failed_summary_and_compression_are_announced_at_once() {
+    let mut h = Harness::new();
+    let id = summarized_session(&h.store);
+    fail_conversation(&h.store, &id, Step::Summarize, 1);
+    let problems = Problems {
+        conversations: vec![1],
+        compression: Some("ffmpeg not found".into()),
+    };
+    h.failed_conversations(&id, problems, None);
+    let notes = h.notes.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let lines: Vec<_> = notes[0].body.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "15:15 to 15:22, the summary failed: GPU out of memory",
+            "compressing the audio failed (WAVs kept): ffmpeg not found",
+            &format!("Run `kute process {id}` once it is fixed."),
+        ]
+    );
+}
+
+#[test]
+fn recording_shows_a_note_with_stop_and_discard_until_it_ends() {
+    let mut h = Harness::new();
+    let id = match h.request(Request::Record { title: None }) {
+        Response::Ok { message } => message.trim_start_matches("recording ").to_string(),
+        other => panic!("{other:?}"),
+    };
+    let notes = h.notes.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].title, "Recording");
+    assert_eq!(
+        notes[0].buttons,
+        [
+            ("Stop".to_string(), Click::Stop(id.clone())),
+            ("Discard".to_string(), Click::Discard(id.clone())),
+        ]
+    );
+    assert!(h.notes.withdrawn().is_empty());
+
+    // A button for another session (one that ended since) does nothing.
+    h.daemon
+        .handle(Event::Click(Click::Stop("2020-01-01T000000".into())), h.now)
+        .unwrap();
+    assert_eq!(h.phase(), Phase::Recording);
+
+    h.daemon
+        .handle(Event::Click(Click::Stop(id.clone())), h.now)
+        .unwrap();
+    assert_eq!(h.phase(), Phase::Idle);
+    assert_eq!(h.notes.withdrawn(), ["recording"]);
+    let meta = h.store.session(&id).unwrap().load_meta().unwrap();
+    assert_eq!(meta.state, SessionState::Processing);
+}
+
+#[test]
+fn discard_from_the_note_deletes_the_session() {
+    let mut h = Harness::new();
+    let id = match h.request(Request::Record { title: None }) {
+        Response::Ok { message } => message.trim_start_matches("recording ").to_string(),
+        other => panic!("{other:?}"),
+    };
+    h.daemon
+        .handle(Event::Click(Click::Discard(id.clone())), h.now)
+        .unwrap();
+    assert_eq!(h.phase(), Phase::Idle);
+    assert!(h.store.session(&id).is_err());
+    assert_eq!(h.notes.withdrawn(), ["recording"]);
 }

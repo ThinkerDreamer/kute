@@ -61,35 +61,32 @@ one in the config with `transcribe.model`; a path to any ggml `.bin` file works 
 
 ## Running the daemon at login
 
-Until `kute service install` exists, write the systemd user unit by hand. Save this as
-`~/.config/systemd/user/kute.service`, adjusting `ExecStart` if `kute` isn't in `~/.cargo/bin`:
-
-```ini
-[Unit]
-Description=kute: record, transcribe and summarize calls
-After=pipewire.service wireplumber.service
-Wants=pipewire.service
-
-[Service]
-ExecStart=%h/.cargo/bin/kute daemon
-Restart=on-failure
-RestartSec=5
-# Include wherever your summarizer command lives (e.g. ~/.local/bin).
-Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin
-
-[Install]
-WantedBy=default.target
-```
-
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now kute
-journalctl --user -u kute -f      # follow its log
+kute service install
 ```
+
+writes `~/.config/systemd/user/kute.service`, enables it and starts it. The unit runs the `kute`
+binary you ran it with, by the path you ran it from: `~/.cargo/bin/kute` after `cargo install`,
+`~/.nix-profile/bin/kute` from a Nix profile, a store path from `nix run`. Its `PATH` is
+`~/.local/bin`, `~/.cargo/bin` and the binary's folder, then the `PATH` of the shell you ran the
+install from, so the daemon finds `pw-record`, `ffmpeg` and your summarizer command where your
+shell does. `kute service install --print` shows the unit without installing it.
+
+Run it again after moving the binary or changing your `PATH`. If the daemon is idle, it restarts
+with the new unit; if it is recording or processing, it tells you to restart it yourself
+(`systemctl --user restart kute`) once it's done, since a restart mid-call splits the call into
+two sessions.
+
+If you wrote a `kute.service` by hand, `kute service install` won't touch it. `--force` replaces
+it and keeps yours as `kute.service.bak`.
 
 A systemd user service doesn't see the environment of your shell, so an API key for a
-summarizer (e.g. `ANTHROPIC_API_KEY`) has to be set in the unit too, for example with
-`EnvironmentFile=%h/.config/kute/env` pointing to a file only you can read.
+summarizer (e.g. `ANTHROPIC_API_KEY`) goes in `~/.config/kute/env`, which the unit reads if it
+exists. Keep it private (`chmod 600`):
+
+```bash
+ANTHROPIC_API_KEY=...
+```
 
 Run only one daemon at a time. To try `kute daemon` in a terminal, stop the service first.
 
@@ -107,8 +104,7 @@ the index from the session folders on its own.
 ## Uninstalling
 
 ```bash
-systemctl --user disable --now kute
-rm ~/.config/systemd/user/kute.service
+kute service uninstall     # stops and disables the service, removes the unit kute wrote
 cargo uninstall kute
 ```
 

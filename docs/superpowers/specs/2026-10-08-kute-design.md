@@ -482,7 +482,7 @@ min_words = 80
 | `reindex` | rebuild `index.sqlite` from the files |
 | `model download [name]` / `model list` | manage models |
 | `doctor` | check PipeWire, ffmpeg/ffprobe, GPU backend, models, summarizer reachability (command on `PATH`, URL responds) |
-| `service install` | write and enable the systemd user unit, with a `PATH` that includes `~/.local/bin` and `~/.cargo/bin` |
+| `service install [--force] [--print]` / `service uninstall` | write, enable and start the systemd user unit for the running binary (by the path it was started from, so a Nix profile link survives updates), with a `PATH` of `~/.local/bin`, `~/.cargo/bin`, the binary's folder and the installing shell's `PATH`; a hand-written unit is replaced only with `--force` (kept as `.bak`); a running daemon is restarted only when idle |
 | `debug trace [--out file]` | record PipeWire graph events to a file for bug reports and test fixtures |
 
 `<id>` accepts a full ID, a unique prefix, or `last`.

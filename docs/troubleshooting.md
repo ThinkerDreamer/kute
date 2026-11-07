@@ -69,7 +69,18 @@ run `kute process <id>` to finish it right away.
 
 ## The "Summary ready" notification doesn't open the file
 
-Set `notify.open` to an editor that's installed, e.g. `["kate"]`, and restart the daemon.
+The log (`journalctl --user -u kute`) says why after each click, e.g. `xdg-open ... failed`.
+
+- **`no DISPLAY environment variable specified` or `no method available`:** the daemon started
+  before your desktop session and has no display. kute takes the display from
+  `systemctl --user show-environment` on each click, which your desktop fills in when it starts;
+  if that's empty too, your desktop doesn't tell systemd (some window managers need
+  `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY` in their startup).
+- **The editor isn't installed:** set `notify.open` to one that is, e.g. `["kate"]`, and restart
+  the daemon.
+- **The button is missing:** some desktops (KDE Plasma among them) drop a notification's buttons
+  once it has moved from the popup to the history. Open the summary with
+  `kute show last --summary` or `kute open last`.
 
 ## `kute` says it can't reach the daemon or `XDG_RUNTIME_DIR` is not set
 
