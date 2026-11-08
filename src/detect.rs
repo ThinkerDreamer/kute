@@ -64,8 +64,8 @@ pub struct Detector {
     trigger: Option<App>,
     /// Serials of the trigger app's output streams seen while a mic stream was alive.
     bound: BTreeSet<u64>,
-    /// While Idle, the output streams of the last snapshot without a live mic. They were
-    /// playing before the call, such as another browser tab, so they are never bound.
+    /// While Idle, the running output streams of the last snapshot without a live mic. They
+    /// were playing before the call, such as another browser tab, so they are never bound.
     before_call: BTreeSet<u64>,
     /// The last snapshot, so `tick` can judge liveness between snapshots.
     last: Vec<Stream>,
@@ -130,7 +130,11 @@ impl Detector {
         self.last = streams.to_vec();
         if self.phase == Phase::Idle {
             if self.live_mics().next().is_none() {
-                self.before_call = self.outputs().map(|s| s.serial).collect();
+                self.before_call = self
+                    .outputs()
+                    .filter(|s| s.running)
+                    .map(|s| s.serial)
+                    .collect();
             }
             return self.start_if_called(now_ms);
         }
@@ -612,6 +616,19 @@ mod tests {
         assert!(d.tick(102_000).is_empty());
         assert_eq!(d.phase(), Phase::Grace);
         assert_eq!(d.tick(115_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn idle_output_from_before_the_call_can_still_be_bound() {
+        // The app keeps an idle output node around and plays the call through it.
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[out(50, jitsi(), false)], 0);
+        d.streams(&[out(50, jitsi(), true), mic(60, jitsi())], 10_000);
+        assert_eq!(d.tick(30_000), vec![Action::Commit]);
+        // The app closes its mic on mute; the call's output keeps running.
+        d.streams(&[out(50, jitsi(), true)], 100_000);
+        assert!(d.tick(110_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
     }
 
     #[test]

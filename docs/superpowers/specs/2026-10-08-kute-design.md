@@ -217,8 +217,8 @@ later per-speaker labels on the others side (`Others (A)`).
 - **Session alive:** any non-ignored mic stream exists, **or** one of the session's
   *bound output nodes* still exists. A bound output node is a `Stream/Output/Audio` node of
   the trigger app (same binary and `application.name`) that was present at some moment
-  while a mic stream was alive, but not in the last snapshot before the session's mic
-  appeared, and it counts only while its state is `running`: the Jitsi
+  while a mic stream was alive and was not already `running` in the last snapshot before the
+  session's mic appeared, and it counts only while its state is `running`: the Jitsi
   Meet app's output stream stayed `running` through silence and went `idle` the moment the
   user left the room (spike, section 12). The second clause keeps a session alive if an app closes its
   mic on mute. It is bound to specific nodes, not to the app, so a YouTube video started in the same
