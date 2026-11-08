@@ -152,7 +152,7 @@ fn language_change(text: &str) -> Result<LanguageChange> {
 /// What the tray shows for a status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
-    pub icon: &'static str,
+    pub icon: Icon,
     /// The first line of the tooltip and the menu.
     pub headline: String,
     /// Further lines: the work in progress.
@@ -162,15 +162,77 @@ pub struct View {
     pub paused: bool,
 }
 
-/// Breeze and Adwaita both have these; `media-record` is a red dot.
-const ICON_LISTENING: &str = "audio-input-microphone";
-const ICON_RECORDING: &str = "media-record";
-const ICON_PAUSED: &str = "media-playback-pause";
+/// The tray icon's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    Listening,
+    Recording,
+    Paused,
+}
+
+impl Icon {
+    const ALL: [Icon; 3] = [Icon::Listening, Icon::Recording, Icon::Paused];
+
+    /// kute's own icon: an ear and a mic ("kute" is to listen, and the ear, in Toki Pona).
+    /// Symbolic, so Plasma recolours it to the panel's theme; the recording mic stays red.
+    fn own(self) -> (&'static str, &'static str) {
+        match self {
+            Icon::Listening => (
+                "kute-listening-symbolic",
+                include_str!("../assets/icons/kute-listening-symbolic.svg"),
+            ),
+            Icon::Recording => (
+                "kute-recording-symbolic",
+                include_str!("../assets/icons/kute-recording-symbolic.svg"),
+            ),
+            Icon::Paused => (
+                "kute-paused-symbolic",
+                include_str!("../assets/icons/kute-paused-symbolic.svg"),
+            ),
+        }
+    }
+
+    /// A stand-in from the desktop's theme, for when kute's own could not be written out.
+    /// Breeze and Adwaita both have these; `media-record` is a red dot.
+    fn themed(self) -> &'static str {
+        match self {
+            Icon::Listening => "audio-input-microphone",
+            Icon::Recording => "media-record",
+            Icon::Paused => "media-playback-pause",
+        }
+    }
+}
+
+/// Writes kute's icons to `dir`, which the tray then names as its icon theme path, so the
+/// tray host finds them whether kute came from cargo, Nix or a distribution package.
+/// Plasma takes the icon from the top of that folder (and wants the path to end in
+/// `icons`); GNOME's AppIndicator extension adds it to GTK's icon search path.
+fn write_icons(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for icon in Icon::ALL {
+        let (name, svg) = icon.own();
+        let path = dir.join(format!("{name}.svg"));
+        // Rewriting an unchanged file would only make the host reload it.
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(svg) {
+            std::fs::write(&path, svg)?;
+        }
+    }
+    Ok(())
+}
+
+/// `~/.local/share/kute/icons`, once kute's icons are written there.
+fn own_icons() -> Option<std::path::PathBuf> {
+    let dir = dirs::data_dir()?.join("kute").join("icons");
+    write_icons(&dir)
+        .inspect_err(|e| eprintln!("kute: using the theme's tray icons: {e:#}"))
+        .ok()?;
+    Some(dir)
+}
 
 /// Until the daemon's first status arrives.
 fn starting() -> View {
     View {
-        icon: ICON_LISTENING,
+        icon: Icon::Listening,
         headline: "kute is starting".into(),
         details: Vec::new(),
         recording: None,
@@ -186,11 +248,11 @@ pub fn view(status: &Status) -> View {
             Some(app) => format!("Recording: {app}"),
             None => "Recording".into(),
         };
-        (ICON_RECORDING, headline)
+        (Icon::Recording, headline)
     } else if status.paused {
-        (ICON_PAUSED, "Paused: not detecting calls".into())
+        (Icon::Paused, "Paused: not detecting calls".into())
     } else {
-        (ICON_LISTENING, "Listening for calls".into())
+        (Icon::Listening, "Listening for calls".into())
     };
     let mut details = Vec::new();
     if status.phase == Phase::Grace {
@@ -229,6 +291,8 @@ pub struct KuteTray {
     /// Mark the icon passive while idle. Plasma tucks a passive item into the overflow;
     /// other hosts, such as Cinnamon's, hide it outright, so there it stays active.
     passive_when_idle: bool,
+    /// Where kute's own icons are; `None`: use the theme's.
+    icons: Option<std::path::PathBuf>,
 }
 
 /// Whether the desktop tucks a passive tray item away instead of hiding it: only Plasma, as
@@ -304,7 +368,18 @@ impl ksni::Tray for KuteTray {
     }
 
     fn icon_name(&self) -> String {
-        self.view.icon.into()
+        match self.icons {
+            Some(_) => self.view.icon.own().0,
+            None => self.view.icon.themed(),
+        }
+        .into()
+    }
+
+    fn icon_theme_path(&self) -> String {
+        self.icons
+            .as_ref()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     fn status(&self) -> ksni::Status {
@@ -384,7 +459,7 @@ impl ksni::Tray for KuteTray {
             None => items.push(
                 StandardItem {
                     label: "Record now".into(),
-                    icon_name: ICON_RECORDING.into(),
+                    icon_name: Icon::Recording.themed().into(),
                     activate: Box::new(|t: &mut Self| t.send(TrayAction::Record)),
                     ..Default::default()
                 }
@@ -463,6 +538,7 @@ impl Tray {
             passive_when_idle: passive_when_idle(
                 std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
             ),
+            icons: own_icons(),
         };
         let handle = tray
             .assume_sni_available(true)
@@ -497,7 +573,7 @@ mod tests {
     #[test]
     fn recording_shows_the_app_and_a_red_icon() {
         let v = view(&status(Phase::Recording));
-        assert_eq!(v.icon, ICON_RECORDING);
+        assert_eq!(v.icon, Icon::Recording);
         assert_eq!(v.headline, "Recording: Jitsi Meet");
         assert_eq!(v.recording.as_deref(), Some("2026-11-07T101500"));
     }
@@ -512,14 +588,14 @@ mod tests {
     #[test]
     fn a_tentative_session_looks_like_listening() {
         let v = view(&status(Phase::Tentative));
-        assert_eq!(v.icon, ICON_LISTENING);
+        assert_eq!(v.icon, Icon::Listening);
         assert_eq!(v.recording, None);
     }
 
     #[test]
     fn grace_is_still_recording_and_says_so() {
         let v = view(&status(Phase::Grace));
-        assert_eq!(v.icon, ICON_RECORDING);
+        assert_eq!(v.icon, Icon::Recording);
         assert_eq!(v.details, ["The call seems over; stopping soon"]);
     }
 
@@ -531,7 +607,7 @@ mod tests {
         s.queued = 2;
         s.retrying = 1;
         let v = view(&s);
-        assert_eq!(v.icon, ICON_PAUSED);
+        assert_eq!(v.icon, Icon::Paused);
         assert_eq!(
             v.details,
             [
@@ -551,6 +627,7 @@ mod tests {
             open: Vec::new(),
             dialog_path: Some(std::ffi::OsString::new()),
             passive_when_idle: true,
+            icons: None,
         };
         (tray, rx)
     }
@@ -570,6 +647,29 @@ mod tests {
         assert!(matches!(tray.status(), ksni::Status::Passive));
         tray.passive_when_idle = false;
         assert!(matches!(tray.status(), ksni::Status::Active));
+    }
+
+    #[test]
+    fn writes_its_icons_and_names_them_for_the_tray_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let icons = dir.path().join("kute/icons");
+        write_icons(&icons).unwrap();
+        for icon in Icon::ALL {
+            let (name, svg) = icon.own();
+            let written = std::fs::read_to_string(icons.join(format!("{name}.svg"))).unwrap();
+            assert_eq!(written, svg);
+            // Plasma recolours symbolic icons through this stylesheet.
+            assert!(svg.contains("current-color-scheme"), "{name}");
+        }
+        // Again over the same files: nothing to change, and no error.
+        write_icons(&icons).unwrap();
+
+        let (mut t, _rx) = tray(&status(Phase::Recording));
+        assert_eq!(t.icon_name(), "media-record");
+        assert_eq!(t.icon_theme_path(), "");
+        t.icons = Some(icons.clone());
+        assert_eq!(t.icon_name(), "kute-recording-symbolic");
+        assert_eq!(t.icon_theme_path(), icons.to_string_lossy());
     }
 
     fn meta() -> Meta {

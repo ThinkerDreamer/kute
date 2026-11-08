@@ -22,6 +22,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      # The tray icons, built into the binary.
+      ../assets
       ../tests
     ];
   };

@@ -90,9 +90,9 @@ See [Installing](docs/install.md#running-the-daemon-at-login) for API keys and f
 unit you wrote by hand.
 
 Then just take calls. While one is recorded, a notification "Recording: <app>" offers Stop and
-Discard, and the tray icon turns into a red dot. When a summary is ready, a notification shows
-its first line; click it to open `summary.md`. The tray icon's menu records, stops, turns call
-detection off and on, and opens the recordings folder. While a call is recorded, it also asks for
+Discard, and the mic in the tray icon (an ear and a mic) turns red. When a summary is ready, a
+notification shows its first line; click it to open `summary.md`. The tray icon's menu records,
+stops, turns call detection off and on, and opens the recordings folder. While a call is recorded, it also asks for
 the call's title, who else is on it, its languages and notes for the summary, in a small dialog
 (kdialog, or zenity where there is no kdialog). From a terminal:
 

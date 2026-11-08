@@ -101,6 +101,10 @@ The log (`journalctl --user -u kute`) says why after each click, e.g. `xdg-open 
   Tray*, and set kute to *Always shown* if you want it in view.
 - **GNOME has no tray of its own.** Install the AppIndicator and KStatusNotifierItem Support
   extension. `kute doctor` says whether a tray host is running.
+- **A blank or generic icon?** kute writes its icons to `~/.local/share/kute/icons` when the
+  daemon starts and tells the tray host to look there. A host that ignores that folder shows
+  nothing or its own fallback; if the folder can't be written, kute uses the theme's mic, red dot
+  and pause icons instead (the log says why).
 
 ## `kute` says it can't reach the daemon or `XDG_RUNTIME_DIR` is not set
 
