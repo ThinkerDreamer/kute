@@ -53,6 +53,16 @@ jobs:
         env:
           KUTE_TEST_MODELS: ${{ github.workspace }}/test-models
 
+  deny:
+    name: cargo deny (advisories, licenses, sources)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
   vulkan:
     name: build with Vulkan (default features)
     runs-on: ubuntu-24.04

@@ -1,0 +1,49 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# CI runs `cargo deny check` on every push and pull request.
+
+[graph]
+# Kute only ships for Linux; skip dependencies that only build for other platforms.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# Every RustSec advisory (vulnerable, unmaintained, unsound, yanked) fails the check unless
+# it is listed here with a reason.
+ignore = [
+    # zbus 6 folded these crates into itself, so zbus 5 still depends on them. ksni 0.3 and
+    # notify-rust 4 (the tray icon and notifications) are both on zbus 5; drop these once they
+    # move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: pulled in by zbus 5 via ksni and notify-rust" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: pulled in by zbus 5 via ksni and notify-rust" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: pulled in by zbus 5 via ksni and notify-rust" },
+]
+
+[licenses]
+# Permissive licenses that let Kute ship as MIT OR Apache-2.0, plus MPL-2.0, whose copyleft
+# only covers that crate's own files (option-ext, via dirs; we use it unmodified).
+# CDLA-Permissive-2.0 is the license of the Mozilla root certificate data in webpki-roots.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Two versions of a crate in the tree is worth knowing about but not worth blocking a PR.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -22,7 +22,12 @@ CI runs these, so run them before you push:
 cargo fmt --check
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test --no-default-features
+cargo deny check   # cargo install cargo-deny
 ```
+
+`cargo deny` checks dependencies against the RustSec advisories, the allowed licenses and
+crates.io as the only source (`deny.toml`). If it flags an advisory with no fix yet, add it to
+`[advisories] ignore` with a reason.
 
 The tests need `ffmpeg` but no microphone, PipeWire or GPU: captures, speech detection and
 Whisper have fakes (`src/testing.rs`), and the daemon is tested end to end with made-up PipeWire
