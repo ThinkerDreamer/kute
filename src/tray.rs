@@ -226,6 +226,15 @@ pub struct KuteTray {
     /// Where to look for kdialog or zenity; `None`: `PATH`. Looked up each time the menu
     /// opens, so one installed while kute runs is used straight away.
     dialog_path: Option<std::ffi::OsString>,
+    /// Mark the icon passive while idle. Plasma tucks a passive item into the overflow;
+    /// other hosts, such as Cinnamon's, hide it outright, so there it stays active.
+    passive_when_idle: bool,
+}
+
+/// Whether the desktop tucks a passive tray item away instead of hiding it: only Plasma, as
+/// far as we know. `XDG_CURRENT_DESKTOP` is a colon-separated list, e.g. `KDE` or `X-Cinnamon`.
+fn passive_when_idle(current_desktop: Option<&str>) -> bool {
+    current_desktop.is_some_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")))
 }
 
 impl KuteTray {
@@ -299,7 +308,7 @@ impl ksni::Tray for KuteTray {
     }
 
     fn status(&self) -> ksni::Status {
-        if self.view.recording.is_some() {
+        if self.view.recording.is_some() || !self.passive_when_idle {
             ksni::Status::Active
         } else {
             // Plasma tucks a passive item into the overflow; recording brings it out.
@@ -451,6 +460,9 @@ impl Tray {
             store,
             open,
             dialog_path: None,
+            passive_when_idle: passive_when_idle(
+                std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            ),
         };
         let handle = tray
             .assume_sni_available(true)
@@ -538,8 +550,26 @@ mod tests {
             store: Store::open(std::env::temp_dir().join("kute-tray-unused")).unwrap(),
             open: Vec::new(),
             dialog_path: Some(std::ffi::OsString::new()),
+            passive_when_idle: true,
         };
         (tray, rx)
+    }
+
+    #[test]
+    fn only_plasma_gets_a_passive_icon_when_idle() {
+        assert!(passive_when_idle(Some("KDE")));
+        assert!(passive_when_idle(Some("ubuntu:KDE")));
+        assert!(!passive_when_idle(Some("X-Cinnamon")));
+        assert!(!passive_when_idle(Some("ubuntu:GNOME")));
+        assert!(!passive_when_idle(None));
+    }
+
+    #[test]
+    fn an_idle_icon_stays_active_where_passive_would_hide_it() {
+        let (mut tray, _rx) = tray(&status(Phase::Idle));
+        assert!(matches!(tray.status(), ksni::Status::Passive));
+        tray.passive_when_idle = false;
+        assert!(matches!(tray.status(), ksni::Status::Active));
     }
 
     fn meta() -> Meta {

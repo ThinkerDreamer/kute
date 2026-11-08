@@ -5,7 +5,7 @@ use crate::store::Track;
 use anyhow::{Context, Result};
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// A running capture: PCM comes out of `reader` until the capture is stopped.
 pub struct Capture {
@@ -79,7 +79,7 @@ pub struct PwRecord;
 impl CaptureSource for PwRecord {
     fn open(&self, track: Track, target: Option<&str>) -> Result<Capture> {
         let mut child = Command::new("pw-record")
-            .args(pw_record_args(track, target))
+            .args(pw_record_args(track, target, pw_record_has_raw()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -93,8 +93,27 @@ impl CaptureSource for PwRecord {
     }
 }
 
-/// `--raw`: without it pw-record puts an AU header in front of the PCM on stdout.
-pub fn pw_record_args(track: Track, target: Option<&str>) -> Vec<String> {
+/// Whether this `pw-record` knows `--raw`. Older ones, such as PipeWire 1.0 on Ubuntu 24.04
+/// and Linux Mint 22, reject it and exit at once; they write raw PCM to stdout anyway.
+fn pw_record_has_raw() -> bool {
+    static HAS_RAW: OnceLock<bool> = OnceLock::new();
+    *HAS_RAW.get_or_init(|| {
+        Command::new("pw-record")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .output()
+            .map(|out| help_has_raw(&out.stdout) || help_has_raw(&out.stderr))
+            .unwrap_or(true)
+    })
+}
+
+fn help_has_raw(help: &[u8]) -> bool {
+    String::from_utf8_lossy(help).contains("--raw")
+}
+
+/// `raw`: pass `--raw`, which a newer pw-record needs, or it puts an AU header in front of
+/// the PCM on stdout. An older one has no such option and writes raw PCM there by default.
+pub fn pw_record_args(track: Track, target: Option<&str>, raw: bool) -> Vec<String> {
     let props = match track {
         Track::Me => r#"{ node.name = "kute-me" media.name = "kute (me)" }"#,
         Track::Others => {
@@ -102,7 +121,6 @@ pub fn pw_record_args(track: Track, target: Option<&str>) -> Vec<String> {
         }
     };
     let mut args: Vec<String> = [
-        "--raw",
         "--rate",
         "16000",
         "--channels",
@@ -114,6 +132,9 @@ pub fn pw_record_args(track: Track, target: Option<&str>) -> Vec<String> {
     ]
     .map(String::from)
     .into();
+    if raw {
+        args.insert(0, "--raw".to_string());
+    }
     if let Some(target) = target {
         args.extend(["--target".to_string(), target.to_string()]);
     }
@@ -128,7 +149,6 @@ mod tests {
     #[test]
     fn pw_record_args_for_both_tracks() {
         let base = [
-            "--raw",
             "--rate",
             "16000",
             "--channels",
@@ -140,7 +160,8 @@ mod tests {
         let me = r#"{ node.name = "kute-me" media.name = "kute (me)" }"#;
         let others = r#"{ node.name = "kute-others" media.name = "kute (others)" stream.capture.sink = true }"#;
         let expect = |props: &str, target: Option<&str>| {
-            let mut v: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+            let mut v: Vec<String> = vec!["--raw".to_string()];
+            v.extend(base.iter().map(|s| s.to_string()));
             v.push(props.to_string());
             if let Some(t) = target {
                 v.extend(["--target".to_string(), t.to_string()]);
@@ -148,12 +169,31 @@ mod tests {
             v.push("-".to_string());
             v
         };
-        assert_eq!(pw_record_args(Track::Me, None), expect(me, None));
+        assert_eq!(pw_record_args(Track::Me, None, true), expect(me, None));
         assert_eq!(
-            pw_record_args(Track::Me, Some("alsa_input.usb-mic")),
+            pw_record_args(Track::Me, Some("alsa_input.usb-mic"), true),
             expect(me, Some("alsa_input.usb-mic"))
         );
-        assert_eq!(pw_record_args(Track::Others, None), expect(others, None));
+        assert_eq!(
+            pw_record_args(Track::Others, None, true),
+            expect(others, None)
+        );
+    }
+
+    #[test]
+    fn pw_record_args_without_raw_for_an_older_pw_record() {
+        let args = pw_record_args(Track::Me, None, false);
+        assert!(!args.contains(&"--raw".to_string()));
+        assert_eq!(args.first().map(String::as_str), Some("--rate"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn help_has_raw_matches_the_option() {
+        assert!(help_has_raw(
+            b"      --raw                           RAW mode\n"
+        ));
+        assert!(!help_has_raw(b"  -R, --remote   Remote daemon name\n"));
     }
 
     #[test]
