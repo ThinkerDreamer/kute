@@ -1071,3 +1071,13 @@ fn discard_from_the_note_deletes_the_session() {
     assert!(h.store.session(&id).is_err());
     assert_eq!(h.notes.withdrawn(), ["recording"]);
 }
+
+#[test]
+fn identity_names_the_config_and_archive() {
+    let mut h = Harness::new();
+    let Response::Identity { config, archive } = h.request(Request::Identity) else {
+        panic!("expected an identity");
+    };
+    assert_eq!(config, None);
+    assert_eq!(archive, h.store.root());
+}

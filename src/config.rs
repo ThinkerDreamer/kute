@@ -17,6 +17,9 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub notify: NotifyConfig,
     pub tray: TrayConfig,
+    /// The file this config was read from, canonicalized; `None` for the defaults (no file).
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -213,7 +216,10 @@ impl Config {
         };
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut config =
+            Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.source = Some(std::fs::canonicalize(&path).unwrap_or(path));
+        Ok(config)
     }
 
     pub fn parse(text: &str) -> Result<Config> {

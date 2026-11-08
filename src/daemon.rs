@@ -258,7 +258,7 @@ impl Daemon {
         match self.request(request, now_ms) {
             Response::Ok { message } => eprintln!("kute: {message} (from {from})"),
             Response::Error { message } => eprintln!("kute: {message}"),
-            Response::Status { .. } => {}
+            Response::Status { .. } | Response::Identity { .. } => {}
         }
     }
 
@@ -280,6 +280,12 @@ impl Daemon {
             Request::Status => {
                 return Ok(Response::Status {
                     status: self.status(),
+                });
+            }
+            Request::Identity => {
+                return Ok(Response::Identity {
+                    config: self.config.source.clone(),
+                    archive: self.store.root().to_path_buf(),
                 });
             }
             Request::Record { title } => {

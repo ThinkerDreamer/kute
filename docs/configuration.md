@@ -5,6 +5,12 @@ optional and every key has a default, so you only write the keys you want to cha
 reads the config when it starts: restart it after an edit (`systemctl --user restart kute`).
 
 `kute --config FILE <command>` uses another file. While the daemon runs, commands such as
+`retranscribe` or `summarize` hand their work to it only if it uses the same file. Otherwise they
+run in the terminal with the other file's settings and archive. If that file shares the daemon's
+archive (no `[storage] dir` of its own), kute refuses, so the two don't work on the same sessions
+at once: stop the daemon first, or give the file its own `dir`.
+
+`kute --config FILE <command>` uses another file. While the daemon runs, commands such as
 `retranscribe` or `summarize` normally hand their work to it; with a `--config` other than the
 default file they run in the terminal instead, so the other file's settings and archive apply.
 

@@ -154,43 +154,45 @@ fn control_commands_without_a_daemon() {
     }
 }
 
-/// A stand-in daemon on the socket the CLI looks for in `runtime_dir`, answering every
-/// request with `reply`.
-fn stand_in_daemon(runtime_dir: &std::path::Path, reply: kute::ipc::Response) {
+/// A stand-in daemon on the socket the CLI looks for in `runtime_dir`. It runs with the
+/// config file `config` (`None`: the defaults) on `archive`, and queues every job it gets,
+/// sending each one on the returned channel.
+fn stand_in_daemon(
+    runtime_dir: &std::path::Path,
+    config: Option<&std::path::Path>,
+    archive: &std::path::Path,
+) -> std::sync::mpsc::Receiver<kute::jobs::Job> {
+    use kute::ipc::{Request, Response};
     let (tx, rx) = std::sync::mpsc::channel::<kute::ipc::Incoming>();
     kute::ipc::serve(&runtime_dir.join("kute.sock"), tx).unwrap();
+    let config = config.map(|c| std::fs::canonicalize(c).unwrap());
+    let archive = archive.to_path_buf();
+    let (jobs, queued) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for incoming in rx {
-            assert_eq!(
-                incoming.request,
-                kute::ipc::Request::Job {
-                    job: kute::jobs::Job::Reindex
+            let reply = match incoming.request {
+                Request::Identity => Response::Identity {
+                    config: config.clone(),
+                    archive: archive.clone(),
+                },
+                Request::Job { job } => {
+                    let message = format!("queued {job}");
+                    let _ = jobs.send(job);
+                    Response::Ok { message }
                 }
-            );
-            let _ = incoming.reply.send(reply.clone());
+                other => panic!("unexpected {other:?}"),
+            };
+            let _ = incoming.reply.send(reply);
         }
     });
+    queued
 }
 
 #[test]
 fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
-    let (tmp, _) = setup();
-    // The daemon's config is the default file, so `--config` naming it means the daemon's
-    // settings.
-    let xdg = tmp.path().join("xdg");
-    let config = xdg.join("kute").join("config.toml");
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::copy(tmp.path().join("config.toml"), &config).unwrap();
-    let message = "queued reindex".into();
-    stand_in_daemon(tmp.path(), kute::ipc::Response::Ok { message });
-    let out = Command::new(env!("CARGO_BIN_EXE_kute"))
-        .env("XDG_RUNTIME_DIR", tmp.path())
-        .env("XDG_CONFIG_HOME", &xdg)
-        .arg("--config")
-        .arg(&config)
-        .arg("reindex")
-        .output()
-        .unwrap();
+    let (tmp, config) = setup();
+    let queued = stand_in_daemon(tmp.path(), Some(&config), &tmp.path().join("data"));
+    let out = kute(&config, &["reindex"]);
     assert!(
         out.status.success(),
         "{}",
@@ -201,27 +203,36 @@ fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
         "queued reindex; the daemon logs the result (journalctl --user -u kute, or the \
          terminal running kute daemon)\n"
     );
+    assert_eq!(queued.try_recv().unwrap(), kute::jobs::Job::Reindex);
 }
 
 #[test]
-fn a_job_with_another_config_runs_here_even_with_a_daemon() {
+fn a_job_with_another_config_and_archive_runs_here() {
     let (tmp, config) = setup();
-    let message = "the daemon got a job meant for another config".into();
-    stand_in_daemon(tmp.path(), kute::ipc::Response::Error { message });
-    let out = Command::new(env!("CARGO_BIN_EXE_kute"))
-        .env("XDG_RUNTIME_DIR", tmp.path())
-        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
-        .arg("--config")
-        .arg(&config)
-        .arg("reindex")
-        .output()
-        .unwrap();
+    let daemon_dir = tempfile::tempdir().unwrap();
+    let queued = stand_in_daemon(tmp.path(), None, daemon_dir.path());
+    let out = kute(&config, &["reindex"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("daemon"));
+    assert!(queued.try_recv().is_err(), "the daemon got the job");
+}
+
+#[test]
+fn a_job_with_another_config_on_the_daemons_archive_is_refused() {
+    let (tmp, config) = setup();
+    let queued = stand_in_daemon(tmp.path(), None, &tmp.path().join("data"));
+    let out = kute(&config, &["reindex"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the running daemon uses the default settings on this archive"),
+        "{err}"
+    );
+    assert!(queued.try_recv().is_err(), "the daemon got the job");
 }
 
 #[test]

@@ -27,12 +27,19 @@ const MAX_LINE: u64 = 1 << 20;
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    Record { title: Option<String> },
+    Record {
+        title: Option<String>,
+    },
     Stop,
     Discard,
     Pause,
     Resume,
-    Job { job: Job },
+    Job {
+        job: Job,
+    },
+    /// Which config and archive the daemon runs with, so a command can tell whether its
+    /// jobs mean the same to the daemon.
+    Identity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,9 +58,21 @@ pub struct Status {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Response {
-    Ok { message: String },
-    Status { status: Status },
-    Error { message: String },
+    Ok {
+        message: String,
+    },
+    Status {
+        status: Status,
+    },
+    Error {
+        message: String,
+    },
+    Identity {
+        /// The daemon's config file (canonical), or `None` when it runs on the defaults.
+        config: Option<PathBuf>,
+        /// The daemon's archive (storage root).
+        archive: PathBuf,
+    },
 }
 
 /// A request received on the socket, with the channel the daemon answers on.

@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
     about = "Records, transcribes and summarizes your calls, locally"
 )]
 struct Cli {
-    /// Config file (default: ~/.config/kute/config.toml). With another file, jobs run here
-    /// instead of on the daemon, which uses the default one
+    /// Config file (default: ~/.config/kute/config.toml). Jobs go to the running daemon only
+    /// if it uses the same file; otherwise they run here
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -310,7 +310,6 @@ pub fn run() -> Result<()> {
     }
     let config = Config::load(cli.config.as_deref())?;
     let store = Store::open(config.data_dir()?)?;
-    let daemon_ok = shares_daemon_config(cli.config.as_deref(), Config::default_path().as_deref());
 
     match cli.command {
         Command::Daemon => daemon::run(store, config)?,
@@ -332,7 +331,6 @@ pub fn run() -> Result<()> {
         } => run_job(
             &store,
             &config,
-            daemon_ok,
             &Job::Import {
                 // Absolute, so the job means the same files wherever it runs.
                 me: std::path::absolute(&me)?,
@@ -348,7 +346,7 @@ pub fn run() -> Result<()> {
             let job = Job::Process {
                 id: session.id.clone(),
             };
-            if !(daemon_ok && queue_on_daemon(&job)?) {
+            if !queue_on_daemon(&store, &config, &job)? {
                 // The daemon's worker processes a recording session's closed conversations;
                 // a second process doing the same at the same time would race it.
                 if session.load_meta()?.state == SessionState::Recording {
@@ -373,7 +371,6 @@ pub fn run() -> Result<()> {
         Command::Title { id, title } => run_job(
             &store,
             &config,
-            daemon_ok,
             &Job::Title {
                 id: store.resolve(&id)?.id,
                 title: title.join(" "),
@@ -389,7 +386,6 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
-                    daemon_ok,
                     &Job::Notes {
                         id: session.id,
                         notes: (!clear).then(|| text.join(" ")),
@@ -405,7 +401,6 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
-                    daemon_ok,
                     &Job::Others {
                         id: session.id,
                         name: (!clear).then(|| name.join(" ")),
@@ -446,7 +441,6 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
-                    daemon_ok,
                     &Job::Language {
                         id: session.id,
                         languages,
@@ -469,7 +463,6 @@ pub fn run() -> Result<()> {
         } => run_job(
             &store,
             &config,
-            daemon_ok,
             &Job::Summarize {
                 id: store.resolve(&id)?.id,
                 conversation,
@@ -480,14 +473,13 @@ pub fn run() -> Result<()> {
         Command::Retranscribe { id, model, lang } => run_job(
             &store,
             &config,
-            daemon_ok,
             &Job::Retranscribe {
                 id: store.resolve(&id)?.id,
                 model,
                 languages: lang.change()?,
             },
         )?,
-        Command::Reindex => run_job(&store, &config, daemon_ok, &Job::Reindex)?,
+        Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
         Command::Service { .. }
         | Command::Doctor { .. }
         | Command::Debug {
@@ -681,6 +673,9 @@ fn control(request: Request) -> Result<()> {
         Some(Response::Ok { message }) => println!("{message}"),
         Some(Response::Status { status }) => print_status(&status),
         Some(Response::Error { message }) => bail!("{message}"),
+        Some(Response::Identity { .. }) => {
+            bail!("the daemon sent its identity instead of an answer")
+        }
     }
     Ok(())
 }
@@ -696,19 +691,6 @@ fn print_status(status: &Status) {
     println!("running: {}", or_dash(&status.running_job));
 }
 
-/// Whether a job may go to the running daemon. The daemon loads the default config file (the
-/// systemd unit passes no `--config`), so only a command using that same file means the
-/// same settings and the same archive. With another `--config`, the job runs here: the
-/// daemon would resolve the session in its own archive and process it with its own
-/// settings.
-fn shares_daemon_config(explicit: Option<&Path>, default: Option<&Path>) -> bool {
-    let Some(explicit) = explicit else {
-        return true;
-    };
-    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
-    default.is_some_and(|d| canonical(d).is_some_and(|d| canonical(explicit) == Some(d)))
-}
-
 /// Makes writing to a closed stdout end the process silently, as other command line tools
 /// do, instead of panicking: Rust ignores SIGPIPE, so `kute list | head` would otherwise
 /// fail in `println!`. Not for the daemon, which must survive a client hanging up on it.
@@ -720,13 +702,41 @@ fn die_quietly_on_closed_pipe() {
     }
 }
 
-/// Hands a processing job to the daemon if it is running, and prints its reply. Returns
-/// whether it did.
-fn queue_on_daemon(job: &Job) -> Result<bool> {
+/// Hands a processing job to the daemon if it is running with this config, and prints its
+/// reply. Returns whether it did.
+///
+/// A daemon with another config would resolve the session in its own archive and process
+/// it with its own settings, so the job runs here instead. If that daemon works on this
+/// same archive, running here would race its worker on the same sessions: that's an error.
+fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
     // Without a runtime dir there is no socket, so no daemon.
     let Ok(path) = ipc::socket_path() else {
         return Ok(false);
     };
+    match ipc::request(&path, &Request::Identity)? {
+        None => return Ok(false),
+        Some(Response::Identity {
+            config: theirs,
+            archive,
+        }) => {
+            if theirs != config.source {
+                if same_dir(&archive, store.root()) {
+                    bail!(
+                        "the running daemon uses {} on this archive, not {}; stop it first \
+                         (systemctl --user stop kute), or give this config its own \
+                         [storage] dir",
+                        describe_config(theirs.as_deref()),
+                        describe_config(config.source.as_deref()),
+                    );
+                }
+                return Ok(false);
+            }
+        }
+        // A daemon from before `Identity` (not restarted since an upgrade): queue the job, as
+        // kute did then.
+        Some(Response::Error { .. }) => {}
+        Some(_) => bail!("the daemon sent another reply instead of its identity"),
+    }
     match ipc::request(&path, &Request::Job { job: job.clone() })? {
         None => Ok(false),
         Some(Response::Ok { message }) => {
@@ -738,14 +748,27 @@ fn queue_on_daemon(job: &Job) -> Result<bool> {
             Ok(true)
         }
         Some(Response::Error { message }) => bail!("{message}"),
-        Some(Response::Status { .. }) => bail!("the daemon sent a status instead of an answer"),
+        Some(Response::Status { .. } | Response::Identity { .. }) => {
+            bail!("the daemon sent another reply instead of an answer")
+        }
     }
 }
 
-/// Queues a processing job on the daemon, or runs it here when there is no daemon or the
-/// daemon would use other settings (`daemon_ok` false, see [`shares_daemon_config`]).
-fn run_job(store: &Store, config: &Config, daemon_ok: bool, job: &Job) -> Result<()> {
-    if daemon_ok && queue_on_daemon(job)? {
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canonical(a) == canonical(b)
+}
+
+fn describe_config(source: Option<&Path>) -> String {
+    match source {
+        Some(path) => path.display().to_string(),
+        None => "the default settings".into(),
+    }
+}
+
+/// Queues a processing job on the daemon, or runs it here when there is no daemon.
+fn run_job(store: &Store, config: &Config, job: &Job) -> Result<()> {
+    if queue_on_daemon(store, config, job)? {
         return Ok(());
     }
     run_foreground(store, config, job)
@@ -882,31 +905,6 @@ fn model_list(store: &Store, config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_default_config_goes_to_the_daemon() {
-        let tmp = tempfile::tempdir().unwrap();
-        let default = tmp.path().join("kute").join("config.toml");
-        let other = tmp.path().join("other.toml");
-        std::fs::create_dir_all(default.parent().unwrap()).unwrap();
-        std::fs::write(&default, "").unwrap();
-        std::fs::write(&other, "").unwrap();
-        assert!(shares_daemon_config(None, Some(&default)));
-        assert!(shares_daemon_config(Some(&default), Some(&default)));
-        // The same file by another name.
-        let alias = tmp
-            .path()
-            .join("kute")
-            .join("..")
-            .join("kute")
-            .join("config.toml");
-        assert!(shares_daemon_config(Some(&alias), Some(&default)));
-        assert!(!shares_daemon_config(Some(&other), Some(&default)));
-        assert!(!shares_daemon_config(Some(&other), None));
-        // No default file: the daemon runs on defaults, which no file means for sure.
-        std::fs::remove_file(&default).unwrap();
-        assert!(!shares_daemon_config(Some(&other), Some(&default)));
-    }
 
     fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {
         let mut progress = Progress::new("m", tty);
