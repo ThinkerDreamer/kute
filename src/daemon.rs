@@ -99,8 +99,8 @@ impl Daemon {
         match event {
             Event::Monitor(MonitorEvent::Snapshot(snapshot)) => {
                 self.snapshot = snapshot;
-                let actions = self.detector.streams(&self.snapshot.streams, now_ms);
-                self.apply(actions)
+                let streams = self.snapshot.streams.clone();
+                self.detect(|d| d.streams(&streams, now_ms))
             }
             Event::Monitor(MonitorEvent::Disconnected(reason)) => {
                 self.disconnected(&reason, now_ms)
@@ -145,8 +145,7 @@ impl Daemon {
     fn disconnected(&mut self, reason: &str, now_ms: u64) -> Result<()> {
         eprintln!("kute: lost the PipeWire graph: {reason}");
         self.snapshot = Snapshot::default();
-        let actions = self.detector.graph_lost(now_ms);
-        self.apply(actions)
+        self.detect(|d| d.graph_lost(now_ms))
     }
 
     fn tick(&mut self, now_ms: u64) -> Result<()> {
@@ -168,8 +167,7 @@ impl Daemon {
                 self.end_failed(&id, &reason, has_audio, now_ms)?;
             }
         }
-        let actions = self.detector.tick(now_ms);
-        self.apply(actions)?;
+        self.detect(|d| d.tick(now_ms))?;
 
         let (due, later) = std::mem::take(&mut self.retries)
             .into_iter()
@@ -323,8 +321,8 @@ impl Daemon {
                 self.detector.resume();
                 // A call already in progress shows up in the last snapshot, which may be
                 // the last one for a while.
-                let actions = self.detector.streams(&self.snapshot.streams, now_ms);
-                self.apply(actions)?;
+                let streams = self.snapshot.streams.clone();
+                self.detect(|d| d.streams(&streams, now_ms))?;
                 "resumed".into()
             }
             Request::Job { job } => {
@@ -441,6 +439,24 @@ impl Daemon {
             anyhow::bail!("the worker has stopped");
         }
         self.running = Some(job);
+        Ok(())
+    }
+
+    /// Runs the detector on a change the user didn't make. A manual session that ends there
+    /// followed a call that has ended: the user expected to stop it, so a note says so.
+    fn detect(&mut self, run: impl FnOnce(&mut Detector) -> Vec<Action>) -> Result<()> {
+        let following = self
+            .detector
+            .following()
+            .then(|| (self.live_id(), self.status().app));
+        let actions = run(&mut self.detector);
+        let ended = following.filter(|_| actions.contains(&Action::Finish));
+        self.apply(actions)?;
+        if let Some((id, app)) = ended {
+            eprintln!("kute: {id}: the call ended, so the manual session did too");
+            self.notifier
+                .notify(notify::call_ended_note(&id, app.as_deref()));
+        }
         Ok(())
     }
 
@@ -689,8 +705,75 @@ impl Drop for RemoveOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notify::Note;
+    use crate::pw::{Stream, StreamKind};
     use crate::store::{SessionState, Track};
     use crate::testing::{FakeSource, run_vad};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Notes(Arc<Mutex<Vec<Note>>>);
+
+    impl Notifier for Notes {
+        fn notify(&self, note: Note) {
+            self.0.lock().unwrap().push(note);
+        }
+    }
+
+    fn snapshot(streams: Vec<Stream>) -> Event {
+        Event::Monitor(MonitorEvent::Snapshot(Snapshot {
+            streams,
+            ..Snapshot::default()
+        }))
+    }
+
+    #[test]
+    fn a_manual_session_that_ends_with_its_call_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let (tx, worker) = mpsc::channel();
+        let notes = Notes::default();
+        let mut d = Daemon::new(
+            store.clone(),
+            Config::default(),
+            Box::new(FakeSource::default()),
+            run_vad(),
+            tx,
+        )
+        .with_notifier(Box::new(notes.clone()));
+        d.control(Request::Record { title: None }, 0).unwrap();
+        let id = d.live_id();
+        let jitsi = App {
+            name: Some("Jitsi Meet".into()),
+            binary: Some("electron".into()),
+        };
+        let mic = Stream {
+            serial: 88,
+            kind: StreamKind::Mic,
+            app: jitsi,
+            node_name: None,
+            pid: Some(4242),
+            monitor: false,
+            running: true,
+        };
+        d.handle(snapshot(vec![mic]), 1_000).unwrap();
+        d.handle(Event::Tick, 21_000).unwrap();
+        assert_eq!(d.status().app.as_deref(), Some("Jitsi Meet"));
+        d.handle(snapshot(Vec::new()), 30_000).unwrap();
+        d.handle(Event::Tick, 32_000).unwrap();
+        assert_eq!(d.status().phase, Phase::Grace);
+        d.handle(Event::Tick, 45_000).unwrap();
+        assert!(d.live.is_none());
+        assert_eq!(d.status().phase, Phase::Idle);
+        let notes = notes.0.lock().unwrap();
+        let last = notes.last().expect("a note");
+        assert_eq!(last.title, "Recording stopped: Jitsi Meet");
+        assert_eq!(last.default, Some(Click::OpenFolder(id.clone())));
+        assert!(matches!(
+            worker.try_recv(),
+            Ok(WorkerMsg::Run(Job::Process { id: queued })) if queued == id
+        ));
+    }
 
     #[test]
     fn a_failed_capture_ends_the_session_even_when_the_detector_is_idle() {

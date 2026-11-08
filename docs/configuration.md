@@ -36,6 +36,7 @@ How the daemon decides that a call started and ended. See [How it works](../READ
 | `conversation_gap` | `"5m"` | Silence on both sides that splits a long session into separate conversations, each with its own summary. |
 | `ignore_apps` | `[]` | Apps that never start a recording. |
 | `allow_apps` | unset | When set, only these apps start a recording. |
+| `end_manual` | `true` | A manual recording (`kute record`, or Record in the tray) that a call joins, or that starts during a call, ends with that call like an automatic one. A call counts once its app has had the microphone open for `min_duration`, so a mic check doesn't end it. `false` records until `kute stop`. |
 
 An entry in `ignore_apps` or `allow_apps` matches an app's name (as shown by `kute status` and in
 the transcript header) or its binary, ignoring case: `["Firefox"]` or `["firefox"]`.

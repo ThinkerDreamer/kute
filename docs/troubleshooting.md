@@ -26,7 +26,8 @@ one the daemon uses.
 - **Does the log say it lost the PipeWire graph?** kute needs `pw-dump` and `pw-record` on the
   daemon's `PATH`. Under systemd, that's the `Environment=PATH=...` line in the unit.
 
-To record by hand regardless of detection: `kute record "Title"`, then `kute stop`.
+To record by hand regardless of detection: `kute record "Title"`, then `kute stop`. A manual
+recording that a call joins ends with the call unless `detect.end_manual = false`.
 
 If none of that explains it, record what PipeWire showed during a call and replay it through
 the detector; see [Reporting a bug](#reporting-a-bug).

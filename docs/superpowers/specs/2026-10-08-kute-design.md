@@ -255,7 +255,13 @@ later per-speaker labels on the others side (`Others (A)`).
   finalized), since pausing means "stop listening"; a manual session continues. The tray
   shows the paused state. A manual `kute record` still works while paused.
 - **Manual:** `kute record [title]` starts a session in Recording state with
-  `trigger.kind = "manual"`; it ends only with `kute stop` (no grace logic). If a session
+  `trigger.kind = "manual"`; it ends with `kute stop`. Once a call joins it (an app's mic stream
+  stays live for `min_duration`, counted from the Tentative start when `record` commits one), it
+  follows that call: it binds the call's outputs and ends with it through the same grace logic as
+  an automatic session, with a "Recording stopped" notification. A call already in progress
+  when `record` runs counts, so `stop` then `record` recovers a call stopped by mistake. While
+  paused or without a graph, a manual session carries on. `detect.end_manual = false` keeps manual
+  sessions until `kute stop`. If a session
   is already Recording or in Grace, `record` fails with "already recording <id>" (use
   `kute title` to name it); if one is Tentative, it is committed and turned manual. `kute stop`
   also ends an automatic session immediately. `kute discard` stops and deletes the
@@ -441,6 +447,7 @@ stop_grace = "15s"
 conversation_gap = "5m"
 ignore_apps = []
 # allow_apps = []
+end_manual = true
 
 [capture]
 # mic = "USB"                  # substring of the device name

@@ -137,6 +137,9 @@ pub struct DetectConfig {
     pub ignore_apps: Vec<String>,
     /// When set, only these apps trigger a recording.
     pub allow_apps: Option<Vec<String>>,
+    /// A manual session that a call joins (its mic open for `min_duration`) ends with that
+    /// call, like an automatic one.
+    pub end_manual: bool,
 }
 
 impl Default for DetectConfig {
@@ -147,6 +150,7 @@ impl Default for DetectConfig {
             conversation_gap: SignedDuration::from_mins(5),
             ignore_apps: Vec::new(),
             allow_apps: None,
+            end_manual: true,
         }
     }
 }
@@ -370,6 +374,13 @@ mod tests {
         assert_eq!(c.detect.stop_grace, SignedDuration::from_secs(15));
         assert_eq!(c.detect.conversation_gap, SignedDuration::from_mins(5));
         assert!(c.detect.ignore_apps.is_empty() && c.detect.allow_apps.is_none());
+        assert!(c.detect.end_manual);
+        assert!(
+            !Config::parse("[detect]\nend_manual = false\n")
+                .unwrap()
+                .detect
+                .end_manual
+        );
         assert!(c.capture.mic.is_none());
     }
 

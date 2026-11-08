@@ -67,6 +67,20 @@ pub fn recording_note(id: &str, app: Option<&str>) -> Note {
     }
 }
 
+/// A manual recording that ended with the call it followed.
+pub fn call_ended_note(id: &str, app: Option<&str>) -> Note {
+    Note {
+        title: app.map_or_else(
+            || "Recording stopped".into(),
+            |app| format!("Recording stopped: {app}"),
+        ),
+        body: "The call ended, so the recording did too.".into(),
+        default: Some(Click::OpenFolder(id.into())),
+        buttons: Vec::new(),
+        key: None,
+    }
+}
+
 /// A recording kute had to end (disk full, the capture died). `kept` is whether its session
 /// is still there (a Tentative one with no audio is deleted).
 pub fn recording_failed_note(id: &str, app: Option<&str>, reason: &str, kept: bool) -> Note {

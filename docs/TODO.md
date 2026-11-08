@@ -112,13 +112,15 @@ Found in the final review of plan 3 and deferred.
   playground) keeps the session alive after the call until it stops. Tabs can't be told apart
   by app, PID or client; maybe `media.name`, or a cap on how long bound outputs alone keep a
   session alive.
-- [ ] **After `stop`, a call still in progress can't start a session on its own.** `stop` blocks
+- [x] **After `stop`, a call still in progress can't start a session on its own.** `stop` blocks
   automatic Start until no mic has been seen for 2 s, so if the user stops by mistake (or stops
   a session the call didn't trigger) while the call's mic stays open, only `kute record` records
-  the rest of it, and that session is manual.
-- [ ] **Manual sessions never end on their own.** `kute record` ignores liveness, so a manual
-  session runs until `stop` even after the call is over. Consider ending it like an automatic
-  one once a call it overlapped has ended, or at least notifying after a long silence.
+  the rest of it. That manual session now follows the call and ends with it.
+- [x] **Manual sessions never end on their own.** A manual session that a call joins (mic live
+  for `min_duration`) ends with the call, unless `detect.end_manual = false`.
+- [ ] **A manual session without a call still never ends.** An in-person meeting recorded by
+  hand runs until `stop`. Notify, or end it, after a long silence on both tracks
+  (`live.rs` knows the VAD spans).
 
 ## Packaging
 

@@ -58,8 +58,13 @@ pub struct Detector {
     /// Lowercased.
     allow_apps: Option<Vec<String>>,
     own_pid: u32,
+    end_manual: bool,
     phase: Phase,
     manual: bool,
+    /// A manual session that follows a call: it ends with the call, like an automatic one.
+    following: bool,
+    /// During a manual session not yet following a call, since when a mic has been live.
+    mic_since: Option<u64>,
     paused: bool,
     trigger: Option<App>,
     /// Serials of the trigger app's output streams seen while a mic stream was alive.
@@ -106,8 +111,11 @@ impl Detector {
             ignore_apps: lowercase(&config.ignore_apps),
             allow_apps: config.allow_apps.as_deref().map(lowercase),
             own_pid,
+            end_manual: config.end_manual,
             phase: Phase::Idle,
             manual: false,
+            following: false,
+            mic_since: None,
             paused: false,
             trigger: None,
             bound: BTreeSet::new(),
@@ -195,13 +203,18 @@ impl Detector {
                 self.phase = Phase::Recording;
                 self.manual = true;
                 self.dead_since = None;
+                // The mic that started it counts toward following the call.
+                self.mic_since = Some(self.started_ms);
                 Ok(vec![Action::Commit])
             }
             Phase::Idle => {
                 self.phase = Phase::Recording;
                 self.manual = true;
                 self.started_ms = now_ms;
-                Ok(vec![Action::Start { trigger: None }, Action::Commit])
+                let mut actions = vec![Action::Start { trigger: None }, Action::Commit];
+                // A call already in progress, as after a `stop`, may be followed.
+                actions.extend(self.advance(now_ms));
+                Ok(actions)
             }
         }
     }
@@ -258,6 +271,11 @@ impl Detector {
         self.manual
     }
 
+    /// Whether a manual session follows a call and will end with it.
+    pub fn following(&self) -> bool {
+        self.following
+    }
+
     pub fn trigger(&self) -> Option<&App> {
         self.trigger.as_ref()
     }
@@ -273,6 +291,8 @@ impl Detector {
         }
         self.phase = Phase::Idle;
         self.manual = false;
+        self.following = false;
+        self.mic_since = None;
         self.trigger = None;
         self.bound.clear();
         self.started_ms = 0;
@@ -343,9 +363,43 @@ impl Detector {
             .any(|s| s.running && self.bound.contains(&s.serial))
     }
 
-    /// Moves an automatic session along: commits, confirms gaps, runs out the grace.
+    /// Whether a manual session is to be moved along like an automatic one: once a mic has
+    /// been live for `min_duration`, so a website's mic check doesn't end it, the session
+    /// follows that call. While paused or without a graph, it carries on whatever happens.
+    fn follow(&mut self, now_ms: u64) -> bool {
+        if !self.end_manual {
+            return false;
+        }
+        if self.paused || self.lost {
+            self.dead_since = None;
+            self.mic_since = None;
+            return false;
+        }
+        if self.following {
+            return true;
+        }
+        let Some(app) = self
+            .live_mics()
+            .min_by_key(|s| s.serial)
+            .map(|s| s.app.clone())
+        else {
+            self.mic_since = None;
+            return false;
+        };
+        let since = *self.mic_since.get_or_insert(now_ms);
+        if now_ms.saturating_sub(since) < self.min_duration_ms {
+            return false;
+        }
+        self.following = true;
+        self.dead_since = None;
+        self.trigger = Some(app);
+        true
+    }
+
+    /// Moves a session along: commits, confirms gaps, runs out the grace. A manual one
+    /// only once it follows a call.
     fn advance(&mut self, now_ms: u64) -> Vec<Action> {
-        if self.manual || self.phase == Phase::Idle {
+        if self.phase == Phase::Idle || (self.manual && !self.follow(now_ms)) {
             return Vec::new();
         }
         let alive = self.alive();
@@ -992,5 +1046,129 @@ mod tests {
         assert!(d.graph_lost(131_000).is_empty());
         assert!(d.tick(200_000).is_empty());
         assert_eq!(d.phase(), Phase::Recording);
+    }
+
+    #[test]
+    fn a_manual_session_follows_a_call_and_ends_with_it() {
+        // The user stops the automatic session by mistake, then records the rest by hand.
+        let mut d = recording();
+        d.stop().unwrap();
+        let call = [mic(88, jitsi()), out(114, jitsi(), true)];
+        assert!(d.streams(&call, 30_000).is_empty());
+        d.record(30_000).unwrap();
+        assert_eq!(d.trigger(), None);
+        assert!(d.tick(49_999).is_empty());
+        assert!(!d.following());
+        assert!(d.tick(50_000).is_empty()); // min_duration with the mic open
+        assert!(d.following());
+        assert!(d.manual());
+        assert_eq!(d.trigger(), Some(&jitsi()));
+        // The other side keeps talking a little after the mic closes.
+        assert!(d.streams(&[out(114, jitsi(), true)], 100_000).is_empty());
+        assert!(d.tick(200_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.streams(&[], 300_000).is_empty());
+        assert!(d.tick(302_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert!(d.tick(314_999).is_empty());
+        assert_eq!(d.tick(315_000), vec![Action::Finish]);
+        assert_eq!(d.phase(), Phase::Idle);
+        assert!(!d.manual());
+        assert!(!d.following());
+    }
+
+    #[test]
+    fn a_call_joining_a_manual_session_is_followed_and_may_come_back_in_grace() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        assert!(d.streams(&[mic(88, jitsi())], 60_000).is_empty());
+        assert!(d.tick(80_000).is_empty());
+        assert!(d.following());
+        d.streams(&[], 100_000);
+        d.tick(102_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        // A reconnect.
+        assert!(d.streams(&[mic(90, jitsi())], 110_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+        assert!(d.tick(200_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+    }
+
+    #[test]
+    fn a_mic_check_does_not_end_a_manual_session() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        assert!(d.streams(&[mic(10, firefox())], 10_000).is_empty());
+        assert!(d.tick(29_999).is_empty());
+        assert!(d.streams(&[], 29_999).is_empty());
+        for t in (30..=600).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        assert!(!d.following());
+        assert_eq!(d.phase(), Phase::Recording);
+        // Short opens don't add up to min_duration.
+        for t in (0..10).map(|i| 700_000 + i * 20_000) {
+            d.streams(&[mic(10, firefox())], t);
+            d.streams(&[], t + 15_000);
+        }
+        assert!(d.tick(900_000).is_empty());
+        assert!(!d.following());
+    }
+
+    #[test]
+    fn a_tentative_session_turned_manual_follows_its_call() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(88, jitsi())], 0);
+        assert_eq!(d.record(3_000), Ok(vec![Action::Commit]));
+        assert!(d.tick(19_999).is_empty());
+        assert!(!d.following());
+        assert!(d.tick(20_000).is_empty()); // counted from when the mic opened
+        assert!(d.following());
+        d.streams(&[], 60_000);
+        assert_eq!(d.tick(75_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn end_manual_off_keeps_manual_sessions_until_stop() {
+        let config = DetectConfig {
+            end_manual: false,
+            ..cfg()
+        };
+        let mut d = Detector::new(&config, 1);
+        d.record(0).unwrap();
+        d.streams(&[mic(88, jitsi())], 1_000);
+        assert!(d.tick(60_000).is_empty());
+        assert!(!d.following());
+        d.streams(&[], 70_000);
+        assert!(d.tick(600_000).is_empty());
+        assert_eq!(d.phase(), Phase::Recording);
+    }
+
+    #[test]
+    fn a_followed_manual_session_survives_pause_and_a_lost_graph() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.record(0).unwrap();
+        d.streams(&[mic(88, jitsi())], 1_000);
+        d.tick(21_000);
+        assert!(d.following());
+
+        assert!(d.pause().is_empty());
+        for t in (22..=200).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        assert_eq!(d.phase(), Phase::Recording);
+        d.resume();
+        assert!(d.streams(&[mic(88, jitsi())], 201_000).is_empty());
+
+        assert!(d.graph_lost(210_000).is_empty());
+        for t in (211..=400).map(|s| s * 1_000) {
+            assert!(d.tick(t).is_empty());
+        }
+        assert_eq!(d.phase(), Phase::Recording);
+        // Back without the call: it ends like an automatic one.
+        assert!(d.streams(&[], 401_000).is_empty());
+        assert!(d.tick(403_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(416_000), vec![Action::Finish]);
     }
 }
