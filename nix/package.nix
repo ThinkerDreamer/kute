@@ -14,7 +14,8 @@
 
 rustPlatform.buildRustPackage {
   pname = "kute";
-  version = "0.1.0";
+  # The version lives in Cargo.toml only.
+  version = (lib.importTOML ../Cargo.toml).package.version;
 
   src = lib.fileset.toSource {
     root = ../.;

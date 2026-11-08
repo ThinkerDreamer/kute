@@ -1,0 +1,83 @@
+# git-cliff (https://git-cliff.org) turns the Conventional Commits on main into CHANGELOG.md.
+# See docs/releasing.md for how a release uses it.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to kute are listed here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and kute uses
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
+breaking change bumps the minor version and a fix bumps the patch version.
+
+"""
+body = """
+{%- macro remote_url() -%}
+  https://github.com/ThinkerDreamer/kute
+{%- endmacro -%}
+
+{% if version -%}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## [Unreleased]
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+          {% if commit.breaking %}**breaking:** {% endif %}\
+          {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}\n
+"""
+footer = """
+{% for release in releases -%}
+{% if release.version -%}
+{% if release.previous.version -%}
+[{{ release.version | trim_start_matches(pat="v") }}]: \
+https://github.com/ThinkerDreamer/kute/compare/{{ release.previous.version }}...{{ release.version }}
+{% else -%}
+[{{ release.version | trim_start_matches(pat="v") }}]: \
+https://github.com/ThinkerDreamer/kute/releases/tag/{{ release.version }}
+{% endif -%}
+{% else -%}
+[Unreleased]: https://github.com/ThinkerDreamer/kute/compare/{{ release.previous.version }}...HEAD
+{% endif -%}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+sort_commits = "oldest"
+commit_preprocessors = [
+  # Link "(#12)" to its pull request.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/ThinkerDreamer/kute/pull/${1}))" },
+]
+# The HTML comments keep the groups in this order; striptags drops them from the output.
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^(fix|cli)", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^build", group = "<!-- 3 -->Packaging" },
+  # Only the squash-merged user guides (#1); plan, spec and other docs commits stay out.
+  { message = "^docs.*#[0-9]+", group = "<!-- 4 -->Documentation" },
+  { message = "^docs", skip = true },
+  { message = "^refactor", skip = true },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^style", skip = true },
+  { message = "^chore", skip = true },
+]
+
+[bump]
+# kute is before 1.0: a feat or a breaking change bumps the minor version, a fix the patch.
+features_always_bump_minor = true
+breaking_always_bump_major = false

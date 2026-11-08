@@ -1,0 +1,56 @@
+name: Release
+
+# Runs when a v<version> tag is pushed (see docs/releasing.md): checks that the tag matches
+# Cargo.toml, builds the portable Ubuntu 24.04 tarball and publishes a GitHub release whose notes
+# are that version's CHANGELOG.md section.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  GGML_NATIVE: "OFF"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Tag matches Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $version"
+            exit 1
+          fi
+          grep -q "^## \[$version\]" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Vulkan headers and shader compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan-dev glslc
+
+      - name: Build the tarball
+        id: tarball
+        run: echo "path=$(scripts/package-tarball.sh ubuntu24.04 | tail -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]+\]: http/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: ${{ steps.tarball.outputs.path }}

@@ -132,11 +132,9 @@ The name `kute` was free on the AUR as of 2026-10-08, but new-account registrati
 closed since 2026-08-01 and probably won't reopen before Q1 or Q2 2027. These notes wait for
 that.
 
-- [ ] **Decide when to release 0.1.0.** Before the daemon, the AUR description has to promise only
-  the offline pipeline (import, transcribe, summarize, search), since anyone installing `kute`
-  will expect it to record calls. Or wait for plan 3.
 - [ ] **Publish `kute` from tagged releases**, not `kute-git`: yay only picks up `-git` updates with
-  `--devel`, and a tag is a fixed, tested snapshot. Tag with `git tag v0.1.0 && git push --tags`;
+  `--devel`, and a tag is a fixed, tested snapshot. Releases are tagged `v<version>` (see
+  [releasing.md](releasing.md));
   the PKGBUILD downloads GitHub's generated tarball
   (`https://github.com/ThinkerDreamer/kute/archive/refs/tags/v$pkgver.tar.gz`). Add `kute-git`
   later (`provides=(kute)`, `conflicts=(kute)`) if people want to test unreleased work.

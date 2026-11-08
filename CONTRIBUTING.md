@@ -82,6 +82,9 @@ format.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   ([cheatsheet](https://kapeli.com/cheat_sheets/Conventional_Commits.docset/Contents/Resources/Documents/index)):
   a short summary prefixed with a type such as `feat:`, `fix:` or `docs:`, as in `git log`.
+  `CHANGELOG.md` is generated from them, so a `feat:` or `fix:` summary is what users read in
+  the release notes. Mark a breaking change with `!` (`feat!: ...`) or a `BREAKING CHANGE:`
+  footer. Releases are cut as described in [docs/releasing.md](docs/releasing.md).
 
 ## License
 
