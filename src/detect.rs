@@ -63,8 +63,9 @@ pub struct Detector {
     manual: bool,
     /// A manual session that follows a call: it ends with the call, like an automatic one.
     following: bool,
-    /// During a manual session not yet following a call, since when a mic has been live.
-    mic_since: Option<u64>,
+    /// During a manual session not yet following a call, which app's mic has been live
+    /// since when.
+    mic_since: Option<(App, u64)>,
     paused: bool,
     trigger: Option<App>,
     /// Serials of the trigger app's output streams seen while a mic stream was alive.
@@ -204,7 +205,7 @@ impl Detector {
                 self.manual = true;
                 self.dead_since = None;
                 // The mic that started it counts toward following the call.
-                self.mic_since = Some(self.started_ms);
+                self.mic_since = self.trigger.clone().map(|app| (app, self.started_ms));
                 Ok(vec![Action::Commit])
             }
             Phase::Idle => {
@@ -386,7 +387,14 @@ impl Detector {
             self.mic_since = None;
             return false;
         };
-        let since = *self.mic_since.get_or_insert(now_ms);
+        // Another app's mic taking over starts the count again.
+        let since = match &self.mic_since {
+            Some((candidate, since)) if *candidate == app => *since,
+            _ => {
+                self.mic_since = Some((app.clone(), now_ms));
+                now_ms
+            }
+        };
         if now_ms.saturating_sub(since) < self.min_duration_ms {
             return false;
         }
@@ -1113,6 +1121,15 @@ mod tests {
         }
         assert!(d.tick(900_000).is_empty());
         assert!(!d.following());
+        // Nor do one app's mic and then another's, without a gap.
+        d.streams(&[mic(10, firefox())], 1_000_000);
+        d.streams(&[mic(10, firefox()), mic(20, jitsi())], 1_015_000);
+        d.streams(&[mic(20, jitsi())], 1_016_000);
+        assert!(d.tick(1_020_000).is_empty());
+        assert!(!d.following());
+        assert!(d.tick(1_036_000).is_empty());
+        assert!(d.following()); // Jitsi Meet's own 20 s
+        assert_eq!(d.trigger(), Some(&jitsi()));
     }
 
     #[test]
