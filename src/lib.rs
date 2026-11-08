@@ -18,6 +18,7 @@ pub mod merge;
 pub mod models;
 pub mod notify;
 pub mod pipeline;
+pub mod program;
 pub mod pw;
 pub mod recorder;
 pub mod render;

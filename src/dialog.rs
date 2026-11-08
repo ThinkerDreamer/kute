@@ -42,11 +42,7 @@ impl Dialogs {
         [("kdialog", Kind::Kdialog), ("zenity", Kind::Zenity)]
             .into_iter()
             .find_map(|(name, kind)| {
-                std::env::split_paths(path)
-                    .filter(|dir| dir.is_absolute())
-                    .map(|dir| dir.join(name))
-                    .find(|p| is_executable(p))
-                    .map(|program| Dialogs { kind, program })
+                crate::program::find(name, path).map(|program| Dialogs { kind, program })
             })
     }
 
@@ -140,12 +136,6 @@ impl Dialogs {
     pub fn program(&self) -> &Path {
         &self.program
     }
-}
-
-/// A file someone may run: a `kdialog` without the execute bit must not hide a zenity.
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// The dialogs end what they print with one newline; the text's own stay.

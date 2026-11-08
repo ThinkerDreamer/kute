@@ -6,6 +6,7 @@
 use crate::config::{Config, SummaryBackend, TranscribeBackend, expand_tilde};
 use crate::ipc::{self, Request, Response};
 use crate::models;
+use crate::program::{find, is_executable};
 use crate::pw::{self, Snapshot};
 use crate::service;
 use crate::summarize::{anthropic, openai};
@@ -212,18 +213,15 @@ pub fn unit_path_value(unit: &str) -> Option<String> {
     })
 }
 
-/// Where `program` is on `path`, if anywhere.
-fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(program))
-        .find(|p| is_executable(p))
-}
-
-/// A file someone may run, as `Command` needs it.
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+/// Whether a configured command's program (a path, or a name on either `PATH`) can run.
+fn command_found(program: &str, shell_path: &OsStr, service_path: Option<&str>) -> bool {
+    let path = expand_tilde(Path::new(program));
+    if path.components().count() > 1 {
+        is_executable(&path)
+    } else {
+        find(program, shell_path).is_some()
+            || service_path.is_some_and(|p| find(program, OsStr::new(p)).is_some())
+    }
 }
 
 /// What each program is for, and whether kute can work without it.
@@ -425,14 +423,7 @@ fn transcribe_command(argv: &[String], shell_path: &OsStr, service_path: Option<
             "transcribe.backend = \"command\" needs transcribe.command",
         );
     };
-    let path = expand_tilde(Path::new(program));
-    let found = if path.components().count() > 1 {
-        is_executable(&path)
-    } else {
-        find(program, shell_path).is_some()
-            || service_path.is_some_and(|p| find(program, OsStr::new(p)).is_some())
-    };
-    if found {
+    if command_found(program, shell_path, service_path) {
         Check::ok(what, format!("command {}", argv.join(" ")))
     } else {
         Check::fail(
@@ -474,14 +465,7 @@ fn summarizer(config: &Config, shell_path: &OsStr, service_path: Option<&str>) -
                     "summary.backend = \"command\" needs summary.command",
                 )];
             };
-            let path = expand_tilde(Path::new(program));
-            let found = if path.components().count() > 1 {
-                is_executable(&path)
-            } else {
-                find(program, shell_path).is_some()
-                    || service_path.is_some_and(|p| find(program, OsStr::new(p)).is_some())
-            };
-            if found {
+            if command_found(program, shell_path, service_path) {
                 vec![Check::ok(what, format!("command {program:?}"))]
             } else {
                 vec![Check::fail(

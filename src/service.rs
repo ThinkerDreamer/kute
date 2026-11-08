@@ -90,10 +90,7 @@ fn find_program(program: &Path, shell_path: &OsStr) -> Option<PathBuf> {
     if program.components().count() > 1 {
         return std::path::absolute(program).ok();
     }
-    std::env::split_paths(shell_path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
+    crate::program::find(program, shell_path)
 }
 
 /// The daemon's `PATH`: `~/.local/bin`, `~/.cargo/bin` and the binary's own folder first
