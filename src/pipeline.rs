@@ -2,7 +2,7 @@
 //! All progress lives in `meta.toml`, so any run can be interrupted and resumed.
 
 use crate::audio;
-use crate::config::{Config, Labels};
+use crate::config::{Config, Labels, TranscribeBackend};
 use crate::index::Index;
 use crate::models;
 use crate::render;
@@ -10,6 +10,7 @@ use crate::store::{
     CompressionStage, Meta, Session, SessionState, Stage, Step, Store, Track, write_atomic,
 };
 use crate::summarize::{PromptContext, Summarizer, build_prompt};
+use crate::transcribe::command::CommandTranscriber;
 use crate::transcribe::whisper::{SileroVad, WhisperTranscriber};
 use crate::transcribe::{SpeechDetector, Transcriber, session_languages, transcribe_track};
 use anyhow::{Context, Result, anyhow, bail};
@@ -60,6 +61,53 @@ impl AsrProvider for WhisperProvider {
     fn release(&mut self) {
         self.loaded = None;
     }
+}
+
+/// Runs a helper program (`transcribe.backend = "command"`), with Silero for VAD. The program
+/// is started on first use and stopped on `release`, so its model is only loaded while
+/// kute transcribes.
+pub struct CommandProvider {
+    argv: Vec<String>,
+    vad_path: PathBuf,
+    loaded: Option<(SileroVad, CommandTranscriber)>,
+}
+
+impl CommandProvider {
+    pub fn new(config: &Config, store: &Store) -> Result<CommandProvider> {
+        if config.transcribe.command.is_empty() {
+            bail!("transcribe.backend = \"command\" needs transcribe.command");
+        }
+        Ok(CommandProvider {
+            argv: config.transcribe.command.clone(),
+            vad_path: models::resolve_vad(&store.models_dir())?,
+            loaded: None,
+        })
+    }
+}
+
+impl AsrProvider for CommandProvider {
+    fn get(&mut self) -> Result<(&mut dyn SpeechDetector, &mut dyn Transcriber)> {
+        if self.loaded.is_none() {
+            let vad = SileroVad::load(&self.vad_path)?;
+            let asr = CommandTranscriber::start(&self.argv)?;
+            self.loaded = Some((vad, asr));
+        }
+        let (vad, asr) = self.loaded.as_mut().expect("loaded above");
+        Ok((vad as &mut dyn SpeechDetector, asr as &mut dyn Transcriber))
+    }
+
+    fn release(&mut self) {
+        self.loaded = None;
+    }
+}
+
+/// The configured transcription backend. Checks what can be checked up front (model files);
+/// models load on first use.
+pub fn asr_provider(config: &Config, store: &Store) -> Result<Box<dyn AsrProvider>> {
+    Ok(match config.transcribe.backend {
+        TranscribeBackend::Whisper => Box::new(WhisperProvider::new(config, store)?),
+        TranscribeBackend::Command => Box::new(CommandProvider::new(config, store)?),
+    })
 }
 
 #[derive(Debug, Default)]
@@ -247,7 +295,7 @@ impl Pipeline<'_> {
             c.languages.set(track, result.language);
         }
         c.stage = Stage::Transcribed;
-        c.whisper_model = Some(model);
+        c.transcriber = Some(model);
         c.clear_error();
         *meta = save_conversation(session, meta, n)?;
         write_documents(session, meta, &self.config.labels)?;
@@ -723,7 +771,7 @@ mod tests {
         assert_eq!(meta.state, SessionState::Done);
         assert_eq!(meta.conversations[0].stage, Stage::Summarized);
         assert_eq!(meta.conversations[0].languages.me.as_deref(), Some("en"));
-        assert_eq!(meta.conversations[0].whisper_model.as_deref(), Some("fake"));
+        assert_eq!(meta.conversations[0].transcriber.as_deref(), Some("fake"));
         assert_eq!(meta.conversations[0].summarizer.as_deref(), Some("fake"));
 
         let transcript = std::fs::read_to_string(f.session.transcript_path()).unwrap();

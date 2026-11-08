@@ -1,7 +1,7 @@
 //! The `kute` command line.
 
 use crate::bench;
-use crate::config::{Config, SummaryBackend};
+use crate::config::{Config, SummaryBackend, TranscribeBackend};
 use crate::daemon;
 use crate::detect::{Action, Detector, replay};
 use crate::doctor;
@@ -249,7 +249,8 @@ fn language_change(
 
 #[derive(Subcommand)]
 enum ModelCommand {
-    /// Download a Whisper model (default: the configured one) and the VAD model
+    /// Download a Whisper model (default: the configured one, if the backend is whisper) and
+    /// the VAD model
     Download { name: Option<String> },
     /// List known models
     List,
@@ -489,10 +490,21 @@ pub fn run() -> Result<()> {
         Command::Model {
             command: ModelCommand::Download { name },
         } => {
-            let name = name.unwrap_or_else(|| config.transcribe.model.clone());
-            let info = models::find_whisper(&name)
-                .with_context(|| format!("unknown Whisper model {name:?}"))?;
-            for info in [info, &models::VAD_MODEL] {
+            // A command backend transcribes with its own model and needs only the VAD model,
+            // unless a Whisper model is asked for by name.
+            let name = name.or_else(|| {
+                (config.transcribe.backend == TranscribeBackend::Whisper)
+                    .then(|| config.transcribe.model.clone())
+            });
+            let mut wanted = Vec::new();
+            if let Some(name) = name {
+                wanted.push(
+                    models::find_whisper(&name)
+                        .with_context(|| format!("unknown Whisper model {name:?}"))?,
+                );
+            }
+            wanted.push(&models::VAD_MODEL);
+            for info in wanted {
                 let mut progress = Progress::new(info.name, std::io::stderr().is_terminal());
                 let result = models::download(&store.models_dir(), info, &mut |done, total| {
                     if let Some(text) = progress.update(done, total) {

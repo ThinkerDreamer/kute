@@ -3,7 +3,7 @@
 
 use crate::config::Config;
 use crate::jobs::{self, ConversationsFailed, Job, Outcome, Problems};
-use crate::pipeline::WhisperProvider;
+use crate::pipeline::AsrProvider;
 use crate::store::{SessionState, Store};
 use anyhow::Result;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -30,7 +30,7 @@ pub struct WorkerDone {
 }
 
 /// Starts the worker. It runs jobs until `Shutdown`, or until either channel closes. The
-/// Whisper provider is kept between jobs; the pipeline frees its models after each
+/// transcription provider is kept between jobs; the pipeline frees its models after each
 /// transcription run, so nothing stays in VRAM while the worker waits.
 pub fn spawn(
     store: Store,
@@ -41,7 +41,7 @@ pub fn spawn(
     spawn_with(store, config, rx, done, jobs::run)
 }
 
-type RunJob = fn(&Store, &Config, &mut Option<WhisperProvider>, &Job) -> Result<Outcome>;
+type RunJob = fn(&Store, &Config, &mut Option<Box<dyn AsrProvider>>, &Job) -> Result<Outcome>;
 
 /// `spawn` with the function that runs each job, so tests can make one panic.
 fn spawn_with(
@@ -240,7 +240,7 @@ mod tests {
         fn run(
             store: &Store,
             config: &Config,
-            asr: &mut Option<WhisperProvider>,
+            asr: &mut Option<Box<dyn AsrProvider>>,
             job: &Job,
         ) -> Result<Outcome> {
             if matches!(job, Job::Title { .. }) {

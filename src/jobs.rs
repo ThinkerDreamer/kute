@@ -1,13 +1,14 @@
 //! Jobs: the processing work the CLI runs in the foreground and the daemon's worker runs
 //! in the background.
 
+use crate::config::TranscribeBackend;
 use crate::config::{Config, SummaryBackend};
 use crate::import::{self, ImportRequest};
 use crate::index::Index;
-use crate::pipeline::{self, AsrProvider, Pipeline, Report, WhisperProvider};
+use crate::pipeline::{self, AsrProvider, Pipeline, Report};
 use crate::store::{Conversation, LanguageChange, Meta, Session, Stage, Step, Store};
 use crate::summarize;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -182,12 +183,12 @@ pub fn save_details(job: &Job, store: &Store) -> Result<Option<(Session, Meta)>>
     Ok(Some((session, meta)))
 }
 
-/// Runs one job. `asr` holds the Whisper provider between jobs; it is built here on the first
-/// job that transcribes with the configured model.
+/// Runs one job. `asr` holds the transcription provider between jobs; it is built here on the
+/// first job that transcribes with the configured model.
 pub fn run(
     store: &Store,
     config: &Config,
-    asr: &mut Option<WhisperProvider>,
+    asr: &mut Option<Box<dyn AsrProvider>>,
     job: &Job,
 ) -> Result<Outcome> {
     match job {
@@ -202,6 +203,9 @@ pub fn run(
             model,
             languages,
         } => {
+            if model.is_some() && config.transcribe.backend != TranscribeBackend::Whisper {
+                bail!("--model only applies to transcribe.backend = \"whisper\"");
+            }
             let session = store.resolve(id)?;
             if !languages.is_empty() {
                 session.update_meta(|m| languages.apply(&mut m.transcribe))?;
@@ -211,12 +215,12 @@ pub fn run(
                     // Another model for this job only, so it doesn't replace the kept provider.
                     let mut config = config.clone();
                     config.transcribe.model = model.clone();
-                    let mut provider = WhisperProvider::new(&config, store)?;
+                    let mut provider = pipeline::asr_provider(&config, store)?;
                     run_pipeline(
                         store,
                         &config,
                         &session,
-                        Some(&mut provider),
+                        Some(provider.as_mut()),
                         Work::Retranscribe,
                     )?
                 }
@@ -374,14 +378,14 @@ fn conversation_retry(c: &Conversation) -> Option<Duration> {
 }
 
 fn provider<'a>(
-    asr: &'a mut Option<WhisperProvider>,
+    asr: &'a mut Option<Box<dyn AsrProvider>>,
     config: &Config,
     store: &Store,
-) -> Result<&'a mut WhisperProvider> {
+) -> Result<&'a mut dyn AsrProvider> {
     if asr.is_none() {
-        *asr = Some(WhisperProvider::new(config, store)?);
+        *asr = Some(pipeline::asr_provider(config, store)?);
     }
-    Ok(asr.as_mut().expect("set above"))
+    Ok(asr.as_deref_mut().expect("set above"))
 }
 
 /// What a pipeline run left behind: the lines to print and the conversations it summarized.
@@ -416,7 +420,7 @@ fn run_pipeline(
     store: &Store,
     config: &Config,
     session: &Session,
-    asr: Option<&mut WhisperProvider>,
+    asr: Option<&mut dyn AsrProvider>,
     work: Work,
 ) -> Result<Done> {
     let index = pipeline::open_index(store)?;

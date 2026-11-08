@@ -3,7 +3,7 @@
 //! It works without a valid config (that is one of the things it checks), and checks
 //! programs on both the shell's `PATH` and the `PATH` the installed service runs with.
 
-use crate::config::{Config, SummaryBackend, expand_tilde};
+use crate::config::{Config, SummaryBackend, TranscribeBackend, expand_tilde};
 use crate::ipc::{self, Request, Response};
 use crate::models;
 use crate::pw::{self, Snapshot};
@@ -111,7 +111,7 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     checks.push(pipewire(&config));
     flush(&mut checks);
     checks.push(gpu(&config));
-    checks.extend(model_checks(&config));
+    checks.extend(model_checks(&config, &shell_path, service_path.as_deref()));
     flush(&mut checks);
     checks.extend(summarizer(&config, &shell_path, service_path.as_deref()));
     flush(&mut checks);
@@ -405,11 +405,41 @@ fn vulkan_drivers() -> Vec<PathBuf> {
         .collect()
 }
 
-fn model_checks(config: &Config) -> Vec<Check> {
+fn model_checks(config: &Config, shell_path: &OsStr, service_path: Option<&str>) -> Vec<Check> {
     let Ok(dir) = config.data_dir().map(|d| d.join("models")) else {
         return Vec::new();
     };
-    model_checks_in(&dir, &config.transcribe.model)
+    let mut checks = model_checks_in(&dir, &config.transcribe.model);
+    if config.transcribe.backend == TranscribeBackend::Command {
+        // The helper does the transcribing; only the VAD model is kute's.
+        checks[0] = transcribe_command(&config.transcribe.command, shell_path, service_path);
+    }
+    checks
+}
+
+fn transcribe_command(argv: &[String], shell_path: &OsStr, service_path: Option<&str>) -> Check {
+    let what = "transcriber";
+    let Some(program) = argv.first() else {
+        return Check::fail(
+            what,
+            "transcribe.backend = \"command\" needs transcribe.command",
+        );
+    };
+    let path = expand_tilde(Path::new(program));
+    let found = if path.components().count() > 1 {
+        is_executable(&path)
+    } else {
+        find(program, shell_path).is_some()
+            || service_path.is_some_and(|p| find(program, OsStr::new(p)).is_some())
+    };
+    if found {
+        Check::ok(what, format!("command {}", argv.join(" ")))
+    } else {
+        Check::fail(
+            what,
+            format!("transcribe.command {program:?} is not found or not executable"),
+        )
+    }
 }
 
 pub fn model_checks_in(models_dir: &Path, model: &str) -> Vec<Check> {
@@ -776,6 +806,16 @@ mod tests {
         assert_eq!(checks[0].level, Level::Fail);
         assert!(checks[0].detail.contains("kute model download"));
         assert_eq!(checks[1].level, Level::Fail);
+    }
+
+    #[test]
+    fn a_command_transcriber_is_checked_instead_of_the_whisper_model() {
+        let path = OsStr::new("/usr/bin:/bin");
+        let ok = transcribe_command(&["sh".into(), "helper.py".into()], path, None);
+        assert_eq!(ok.level, Level::Ok);
+        let missing = transcribe_command(&["/nonexistent/python".into()], path, None);
+        assert_eq!(missing.level, Level::Fail);
+        assert_eq!(transcribe_command(&[], path, None).level, Level::Fail);
     }
 
     #[test]

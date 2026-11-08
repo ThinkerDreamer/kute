@@ -45,11 +45,8 @@ Found by comparing kute's transcript of a short English/Italian test call with t
 - [x] **`kute model download` floods the terminal.** Now redraws only when the one-decimal value
   changes, and prints a line every 10% when stderr isn't a terminal.
 - [x] **`kute list` shows oldest first.** Newest first now.
-- [ ] **One very long speech region isn't split.** `plan_chunks` (`src/transcribe/mod.rs`) caps
-  chunk length only when joining regions, so a single VAD region over 120 s stays one chunk.
-  Practically unreachable (Silero splits on 100 ms of silence) and whisper.cpp windows internally,
-  but the doc comment overstates it. Set `max_speech_duration_s` on `WhisperVadParams` or split in
-  `plan_chunks`.
+- [x] **One very long speech region isn't split.** `plan_chunks` now splits a chunk longer than
+  the backend's limit (120 s for Whisper, 30 s for the Qwen3-ASR helper) into equal pieces.
 - [ ] **A new Whisper state per call.** `WhisperTranscriber::detect_language` and `transcribe`
   (`src/transcribe/whisper.rs`) each create a `WhisperState` (KV cache + backend buffers). Keep one
   state in the transcriber; whisper.cpp resets it on every `full` call.

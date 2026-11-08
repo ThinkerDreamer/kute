@@ -52,9 +52,33 @@ kute always records the default output's monitor as the "Others" track.
 
 | Key | Default | |
 |---|---|---|
-| `model` | `"large-v3-turbo"` | A name from `kute model list`, or a path to a ggml `.bin` file. |
+| `backend` | `"whisper"` | `whisper` (built in) or `command`: a helper program such as the [Qwen3-ASR helper](../contrib/qwen3-asr/README.md). |
+| `command` | | `command` backend: the program and its arguments. |
+| `model` | `"large-v3-turbo"` | `whisper` backend: a name from `kute model list`, or a path to a ggml `.bin` file. |
 | `language` | `"auto"` | `"auto"` detects the language of each speech chunk, so mixed-language calls work. Set a code such as `"it"` to force one, or several such as `"ru,en"` to detect only among those. A session's own setting (`kute language`, for both tracks or one) wins. |
 | `gpu` | `true` | Set to `false` to transcribe on the CPU even when the build has a GPU backend. `kute doctor --bench` measures which is faster and can set it. |
+
+Every backend uses kute's own speech detection (Silero VAD) to cut the audio into chunks, so
+the VAD model is needed either way.
+
+### The `command` backend
+
+kute starts the program once per transcription run, keeps it running while it transcribes,
+and stops it afterwards, so a model that is slow to load only loads once and frees the GPU
+when kute is done. It sends speech chunks on stdin and reads segments with word timestamps
+from stdout, in JSON lines; `src/transcribe/command.rs` describes the protocol. The model
+name the program reports is saved as each conversation's `transcriber` in `meta.toml`.
+
+```toml
+[transcribe]
+backend = "command"
+command = ["~/kute-qwen/.venv/bin/python", "~/kute-qwen/kute-qwen3-asr.py"]
+```
+
+`language` and `kute language` work as with Whisper. A helper that can't limit detection to a
+list, as Qwen3-ASR can't, chooses among the candidates itself (see its README).
+`kute retranscribe --model`
+only applies to Whisper.
 
 ## `[summary]`
 

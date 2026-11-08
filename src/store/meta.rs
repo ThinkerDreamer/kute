@@ -172,8 +172,14 @@ pub struct Conversation {
     pub stage: Stage,
     #[serde(default)]
     pub languages: Languages,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub whisper_model: Option<String>,
+    /// The model that transcribed it. Sessions from before other backends call it
+    /// `whisper_model`.
+    #[serde(
+        default,
+        alias = "whisper_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transcriber: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,7 +312,7 @@ impl Conversation {
             end_ms,
             stage: Stage::Pending,
             languages: Languages::default(),
-            whisper_model: None,
+            transcriber: None,
             summarizer: None,
             failed_step: None,
             error: None,
@@ -389,5 +395,17 @@ mod tests {
         let text = toml::to_string_pretty(&m).unwrap();
         assert!(text.contains("open_conversation_ms = 12000"), "{text}");
         assert_eq!(toml::from_str::<Meta>(&text).unwrap(), m);
+    }
+
+    #[test]
+    fn transcriber_reads_the_old_whisper_model_key() {
+        let old: Conversation = toml::from_str(
+            "n = 1\nstart_ms = 0\nend_ms = 10\nstage = \"transcribed\"\nwhisper_model = \"large-v3-turbo\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.transcriber.as_deref(), Some("large-v3-turbo"));
+        let text = toml::to_string(&old).unwrap();
+        assert!(text.contains("transcriber = \"large-v3-turbo\""), "{text}");
+        assert!(!text.contains("whisper_model"), "{text}");
     }
 }

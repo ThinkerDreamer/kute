@@ -48,10 +48,22 @@ pub struct StorageConfig {
     pub dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscribeBackend {
+    #[default]
+    Whisper,
+    Command,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TranscribeConfig {
-    /// A model name from `kute model list`, or a path to a ggml `.bin` file.
+    /// `whisper` (built in) or `command` (a helper program, see `transcribe::command`).
+    pub backend: TranscribeBackend,
+    /// `command` backend: the program and its arguments.
+    pub command: Vec<String>,
+    /// `whisper` backend: a model name from `kute model list`, or a path to a ggml `.bin` file.
     pub model: String,
     /// `auto`, a Whisper language code such as `it` to force it, or several such as `ru,en`
     /// to detect among them. A session's own languages (`kute language`) win.
@@ -62,6 +74,8 @@ pub struct TranscribeConfig {
 impl Default for TranscribeConfig {
     fn default() -> Self {
         Self {
+            backend: TranscribeBackend::Whisper,
+            command: Vec::new(),
             model: "large-v3-turbo".into(),
             language: "auto".into(),
             gpu: true,
@@ -202,6 +216,13 @@ impl Config {
         let config: Config = toml::from_str(text)?;
         crate::transcribe::parse_languages(&config.transcribe.language)
             .context("transcribe.language")?;
+        if config.transcribe.backend == TranscribeBackend::Command
+            && config.transcribe.command.is_empty()
+        {
+            bail!(
+                "transcribe.backend = \"command\" needs transcribe.command, e.g. [\"~/kute-qwen/.venv/bin/python\", \"kute-qwen3-asr.py\"]"
+            );
+        }
         Ok(config)
     }
 
@@ -288,6 +309,20 @@ mod tests {
             format!("{err:#}").contains("transcribe.language"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn transcribe_backend() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.transcribe.backend, TranscribeBackend::Whisper);
+        let c = Config::parse(
+            "[transcribe]\nbackend = \"command\"\ncommand = [\"python3\", \"asr.py\"]\n",
+        )
+        .unwrap();
+        assert_eq!(c.transcribe.backend, TranscribeBackend::Command);
+        assert_eq!(c.transcribe.command, ["python3", "asr.py"]);
+        let err = Config::parse("[transcribe]\nbackend = \"command\"\n").unwrap_err();
+        assert!(format!("{err:#}").contains("transcribe.command"), "{err:#}");
     }
 
     #[test]

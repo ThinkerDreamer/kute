@@ -1,6 +1,7 @@
 //! Speech detection, chunking, and per-track transcription. The engines sit behind
 //! traits so the orchestration is testable and other backends can be added.
 
+pub mod command;
 pub mod whisper;
 
 use crate::audio::ms_to_samples;
@@ -41,6 +42,16 @@ pub trait SpeechDetector {
 
 pub trait Transcriber {
     fn model_name(&self) -> &str;
+    /// The longest chunk of audio `transcribe` takes at once.
+    fn max_chunk_ms(&self) -> u64 {
+        CHUNK_MAX_MS
+    }
+    /// Speech regions closer than this are joined into one chunk. Whisper wants a short gap,
+    /// since it makes things up in long silences; other engines punctuate better with more
+    /// context.
+    fn chunk_join_gap_ms(&self) -> u64 {
+        CHUNK_JOIN_GAP_MS
+    }
     /// The language spoken in `samples`. With `candidates`, one of them; empty means any
     /// language the engine knows.
     fn detect_language(&mut self, samples: &[f32], candidates: &[String]) -> Result<String>;
@@ -87,8 +98,9 @@ pub fn session_languages(session: &[String], config: &str) -> Result<Vec<String>
     Ok(setting.into_iter().filter(|l| l != ANY_LANGUAGE).collect())
 }
 
-/// Pads speech regions, joins close ones, and caps chunk length. Chunks never overlap.
-pub fn plan_chunks(regions: &[Span], total_ms: u64) -> Vec<Span> {
+/// Pads speech regions, joins ones less than `join_gap_ms` apart, and caps chunk length at
+/// `max_ms`, splitting a region that is longer on its own. Chunks never overlap.
+pub fn plan_chunks(regions: &[Span], total_ms: u64, max_ms: u64, join_gap_ms: u64) -> Vec<Span> {
     let mut sorted = regions.to_vec();
     sorted.sort_by_key(|r| r.start_ms);
     let mut chunks: Vec<Span> = Vec::new();
@@ -102,8 +114,8 @@ pub fn plan_chunks(regions: &[Span], total_ms: u64) -> Vec<Span> {
         }
         match chunks.last_mut() {
             Some(c)
-                if padded.start_ms <= c.end_ms + CHUNK_JOIN_GAP_MS
-                    && padded.end_ms.saturating_sub(c.start_ms) <= CHUNK_MAX_MS =>
+                if padded.start_ms <= c.end_ms + join_gap_ms
+                    && padded.end_ms.saturating_sub(c.start_ms) <= max_ms =>
             {
                 c.end_ms = c.end_ms.max(padded.end_ms);
             }
@@ -120,6 +132,23 @@ pub fn plan_chunks(regions: &[Span], total_ms: u64) -> Vec<Span> {
         }
     }
     chunks
+        .into_iter()
+        .flat_map(|c| split_span(c, max_ms))
+        .collect()
+}
+
+/// Cuts `span` into equal pieces of at most `max_ms`.
+fn split_span(span: Span, max_ms: u64) -> Vec<Span> {
+    let max_ms = max_ms.max(1);
+    let pieces = span.len_ms().div_ceil(max_ms).max(1);
+    let step = span.len_ms().div_ceil(pieces);
+    (0..pieces)
+        .map(|i| Span {
+            start_ms: span.start_ms + i * step,
+            end_ms: (span.start_ms + (i + 1) * step).min(span.end_ms),
+        })
+        .filter(|s| s.end_ms > s.start_ms)
+        .collect()
 }
 
 pub struct TrackResult {
@@ -161,7 +190,12 @@ pub fn transcribe_track(
     }
     // A region cut by a window edge comes back as two touching regions; plan_chunks
     // joins them again.
-    let chunks = plan_chunks(&regions, total_ms);
+    let chunks = plan_chunks(
+        &regions,
+        total_ms,
+        asr.max_chunk_ms(),
+        asr.chunk_join_gap_ms(),
+    );
     let languages = assign_languages(&chunks, read, languages, asr)?;
 
     let mut segments = Vec::new();
@@ -239,13 +273,16 @@ fn assign_languages(
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
+        // Short chunks joined for one detection, within what the backend takes at once.
+        let limit = ms_to_samples(DETECT_WINDOW_MS.min(asr.max_chunk_ms()));
         let mut joined = Vec::new();
         for c in chunks {
             joined.extend(read(c.start_ms, c.end_ms)?);
-            if joined.len() >= ms_to_samples(DETECT_WINDOW_MS) {
+            if joined.len() >= limit {
                 break;
             }
         }
+        joined.truncate(limit);
         let lang = asr.detect_language(&joined, candidates)?;
         return Ok(vec![lang; chunks.len()]);
     }
@@ -284,10 +321,14 @@ mod tests {
         detect_calls: Vec<usize>,
         candidates: Vec<Vec<String>>,
         calls: Vec<(usize, String)>,
+        max_chunk_ms: Option<u64>,
     }
     impl Transcriber for FakeAsr {
         fn model_name(&self) -> &str {
             "fake"
+        }
+        fn max_chunk_ms(&self) -> u64 {
+            self.max_chunk_ms.unwrap_or(CHUNK_MAX_MS)
         }
         fn detect_language(&mut self, samples: &[f32], candidates: &[String]) -> Result<String> {
             self.detect_calls.push(samples.len());
@@ -444,7 +485,7 @@ mod tests {
     #[test]
     fn plan_pads_and_clamps() {
         assert_eq!(
-            plan_chunks(&[span(100, 1_000)], 1_100),
+            plan_chunks(&[span(100, 1_000)], 1_100, CHUNK_MAX_MS, CHUNK_JOIN_GAP_MS),
             vec![span(0, 1_100)]
         );
     }
@@ -452,19 +493,51 @@ mod tests {
     #[test]
     fn plan_joins_small_gaps_and_keeps_big_ones() {
         assert_eq!(
-            plan_chunks(&[span(0, 1_000), span(3_000, 4_000)], 10_000),
+            plan_chunks(
+                &[span(0, 1_000), span(3_000, 4_000)],
+                10_000,
+                CHUNK_MAX_MS,
+                CHUNK_JOIN_GAP_MS
+            ),
             vec![span(0, 4_200)]
         );
         assert_eq!(
-            plan_chunks(&[span(0, 1_000), span(5_000, 6_000)], 10_000),
+            plan_chunks(
+                &[span(0, 1_000), span(5_000, 6_000)],
+                10_000,
+                CHUNK_MAX_MS,
+                CHUNK_JOIN_GAP_MS
+            ),
             vec![span(0, 1_200), span(4_800, 6_200)]
+        );
+    }
+
+    #[test]
+    fn plan_join_gap_is_the_backends() {
+        let regions = [span(0, 1_000), span(5_000, 6_000)];
+        assert_eq!(plan_chunks(&regions, 10_000, CHUNK_MAX_MS, 2_000).len(), 2);
+        assert_eq!(
+            plan_chunks(&regions, 10_000, CHUNK_MAX_MS, 10_000),
+            vec![span(0, 6_200)]
+        );
+    }
+
+    #[test]
+    fn plan_splits_one_long_region() {
+        assert_eq!(
+            plan_chunks(&[span(1_000, 151_000)], 200_000, 60_000, CHUNK_JOIN_GAP_MS),
+            vec![
+                span(800, 50_934),
+                span(50_934, 101_068),
+                span(101_068, 151_200)
+            ]
         );
     }
 
     #[test]
     fn plan_caps_chunk_length_without_overlap() {
         let regions: Vec<Span> = (0..200).map(|i| span(i * 1_000, i * 1_000 + 500)).collect();
-        let chunks = plan_chunks(&regions, 300_000);
+        let chunks = plan_chunks(&regions, 300_000, CHUNK_MAX_MS, CHUNK_JOIN_GAP_MS);
         assert!(chunks.len() >= 2);
         for c in &chunks {
             assert!(c.len_ms() <= CHUNK_MAX_MS, "{c:?}");
@@ -549,6 +622,20 @@ mod tests {
             crate::audio::ms_to_samples(1_200 + 1_400)
         );
         assert_eq!(r.language.as_deref(), Some("it"));
+    }
+
+    #[test]
+    fn joined_detection_stays_within_the_backend_limit() {
+        let mut asr = FakeAsr {
+            max_chunk_ms: Some(2_000),
+            ..Default::default()
+        };
+        let vad = &mut FakeVad(vec![span(0, 1_000), span(5_000, 6_000)]);
+        run(&silence(10_000), 0, 1, &[], vad, &mut asr).unwrap();
+        assert_eq!(asr.detect_calls, [crate::audio::ms_to_samples(2_000)]);
+        for (samples, _) in &asr.calls {
+            assert!(*samples <= crate::audio::ms_to_samples(2_000));
+        }
     }
 
     #[test]
