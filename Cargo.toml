@@ -35,3 +35,10 @@ whisper-rs = "0.16"
 
 [dev-dependencies]
 mockito = "1"
+
+# Smaller release binary: no symbols, and whole-program optimization of the Rust code (whisper.cpp
+# is C++ and unaffected). Panics still unwind: the worker catches them (`src/worker.rs`).
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
