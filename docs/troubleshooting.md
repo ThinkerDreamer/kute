@@ -59,6 +59,10 @@ speakers, the "Me" track contains both and the transcript will repeat lines.
   `transcribe.gpu = false`, is several times slower. A GPU build also falls back to the CPU
   when it finds no usable GPU at run time, for example without Vulkan drivers (see
   [Installing](install.md#requirements)).
+- Measure it: `kute doctor --bench` times the model on the GPU and on the CPU with a 30 s clip
+  and offers to set `transcribe.gpu` to the faster one (`--save` sets it without asking,
+  `--sample FILE` times your own recording). An integrated GPU can be slower than a fast CPU.
+  Restart the daemon afterwards.
 - Try a smaller model, e.g. `large-v3-turbo-q5_0` or `small`.
 
 ## Transcription failed

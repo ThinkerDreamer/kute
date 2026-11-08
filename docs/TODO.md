@@ -168,4 +168,7 @@ that.
 - [ ] **The tray doesn't show how long a call has been recorded.** `Status` has no start time; the
   menu could say "Recording: Zoom (12 min)".
 - [ ] **`kute doctor` doesn't load the Whisper model.** It checks that the file is there, not that
-  it loads on the GPU. A `--deep` option could load it and transcribe a second of silence.
+  it loads on the GPU. `kute doctor --bench` loads it and times it on both, but can't tell when
+  whisper.cpp fell back to the CPU for the GPU pass (see "whisper.cpp logs are swallowed").
+- [ ] **CPU transcription uses at most 8 threads.** `WhisperTranscriber::load` caps the thread
+  count, so `kute doctor --bench` may undersell a 12- or 16-core CPU. Try more threads there.

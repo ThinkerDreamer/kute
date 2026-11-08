@@ -55,21 +55,28 @@ fn open_checked(path: &Path) -> Result<hound::WavReader<BufReader<File>>> {
 
 /// Converts any audio ffmpeg can read into kute's working WAV format.
 pub fn normalize_to_wav(src: &Path, dst: &Path) -> Result<()> {
+    normalize_to_wav_limited(src, dst, None)
+}
+
+/// [`normalize_to_wav`], stopping after `limit_ms` when given.
+pub fn normalize_to_wav_limited(src: &Path, dst: &Path, limit_ms: Option<u64>) -> Result<()> {
     let mut cmd = ffmpeg();
-    cmd.arg("-i")
-        .arg(src)
-        .args([
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            "-f",
-            "wav",
-        ])
-        .arg(dst);
+    cmd.arg("-i").arg(src);
+    if let Some(ms) = limit_ms {
+        cmd.arg("-t").arg(format!("{}.{:03}", ms / 1000, ms % 1000));
+    }
+    cmd.args([
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "wav",
+    ])
+    .arg(dst);
     run(cmd, "ffmpeg")
 }
 
@@ -240,6 +247,9 @@ mod tests {
         let wav = tmp.path().join("norm.wav");
         normalize_to_wav(&src, &wav).unwrap();
         assert!((wav_duration_ms(&wav).unwrap() as i64 - 3_000).abs() < 50);
+        let short = tmp.path().join("short.wav");
+        normalize_to_wav_limited(&src, &short, Some(1_500)).unwrap();
+        assert!((wav_duration_ms(&short).unwrap() as i64 - 1_500).abs() < 50);
 
         let opus = tmp.path().join("out.opus.tmp");
         encode_opus(&wav, &opus).unwrap();

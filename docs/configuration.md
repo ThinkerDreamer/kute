@@ -54,7 +54,7 @@ kute always records the default output's monitor as the "Others" track.
 |---|---|---|
 | `model` | `"large-v3-turbo"` | A name from `kute model list`, or a path to a ggml `.bin` file. |
 | `language` | `"auto"` | `"auto"` detects the language of each speech chunk, so mixed-language calls work. Set a code such as `"it"` to force one, or several such as `"ru,en"` to detect only among those. A session's own setting (`kute language`, for both tracks or one) wins. |
-| `gpu` | `true` | Set to `false` to transcribe on the CPU even when the build has a GPU backend. |
+| `gpu` | `true` | Set to `false` to transcribe on the CPU even when the build has a GPU backend. `kute doctor --bench` measures which is faster and can set it. |
 
 ## `[summary]`
 

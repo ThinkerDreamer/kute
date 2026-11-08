@@ -1,6 +1,7 @@
 //! kute: records, transcribes and summarizes calls, locally.
 
 pub mod audio;
+pub mod bench;
 pub mod capture;
 pub mod cli;
 pub mod config;

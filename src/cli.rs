@@ -1,5 +1,6 @@
 //! The `kute` command line.
 
+use crate::bench;
 use crate::config::{Config, SummaryBackend};
 use crate::daemon;
 use crate::detect::{Action, Detector, replay};
@@ -159,7 +160,18 @@ enum Command {
         command: ServiceCommand,
     },
     /// Check that everything kute needs is installed and set up
-    Doctor,
+    Doctor {
+        /// Time transcription on the GPU and on the CPU, and offer to use the faster one
+        #[arg(long)]
+        bench: bool,
+        /// With --bench: time this recording (any format ffmpeg reads) instead of a built-in
+        /// clip
+        #[arg(long, requires = "bench", value_name = "FILE")]
+        sample: Option<PathBuf>,
+        /// With --bench: set transcribe.gpu in the config without asking
+        #[arg(long, requires = "bench")]
+        save: bool,
+    },
     /// Tools for bug reports
     Debug {
         #[command(subcommand)]
@@ -276,7 +288,19 @@ pub fn run() -> Result<()> {
     {
         return debug_trace(out.as_deref(), duration.as_deref());
     }
-    if let Command::Doctor = &cli.command {
+    if let Command::Doctor {
+        bench,
+        sample,
+        save,
+    } = &cli.command
+    {
+        if *bench {
+            return bench::run(bench::Options {
+                config_path: cli.config.as_deref(),
+                sample: sample.as_deref(),
+                save: *save,
+            });
+        }
         return doctor::run(cli.config.as_deref());
     }
     let config = Config::load(cli.config.as_deref())?;
@@ -452,7 +476,7 @@ pub fn run() -> Result<()> {
         )?,
         Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
         Command::Service { .. }
-        | Command::Doctor
+        | Command::Doctor { .. }
         | Command::Debug {
             command: DebugCommand::Trace { .. },
         } => unreachable!("handled before the config is loaded"),
