@@ -154,22 +154,43 @@ fn control_commands_without_a_daemon() {
     }
 }
 
-#[test]
-fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
-    use kute::ipc::{Request, Response};
-    use kute::jobs::Job;
-    let (tmp, config) = setup();
-    // A stand-in daemon on the socket the CLI looks for.
+/// A stand-in daemon on the socket the CLI looks for in `runtime_dir`, answering every
+/// request with `reply`.
+fn stand_in_daemon(runtime_dir: &std::path::Path, reply: kute::ipc::Response) {
     let (tx, rx) = std::sync::mpsc::channel::<kute::ipc::Incoming>();
-    kute::ipc::serve(&tmp.path().join("kute.sock"), tx).unwrap();
+    kute::ipc::serve(&runtime_dir.join("kute.sock"), tx).unwrap();
     std::thread::spawn(move || {
         for incoming in rx {
-            assert_eq!(incoming.request, Request::Job { job: Job::Reindex });
-            let message = "queued reindex".into();
-            let _ = incoming.reply.send(Response::Ok { message });
+            assert_eq!(
+                incoming.request,
+                kute::ipc::Request::Job {
+                    job: kute::jobs::Job::Reindex
+                }
+            );
+            let _ = incoming.reply.send(reply.clone());
         }
     });
-    let out = kute(&config, &["reindex"]);
+}
+
+#[test]
+fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
+    let (tmp, _) = setup();
+    // The daemon's config is the default file, so `--config` naming it means the daemon's
+    // settings.
+    let xdg = tmp.path().join("xdg");
+    let config = xdg.join("kute").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::copy(tmp.path().join("config.toml"), &config).unwrap();
+    let message = "queued reindex".into();
+    stand_in_daemon(tmp.path(), kute::ipc::Response::Ok { message });
+    let out = Command::new(env!("CARGO_BIN_EXE_kute"))
+        .env("XDG_RUNTIME_DIR", tmp.path())
+        .env("XDG_CONFIG_HOME", &xdg)
+        .arg("--config")
+        .arg(&config)
+        .arg("reindex")
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -180,6 +201,27 @@ fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
         "queued reindex; the daemon logs the result (journalctl --user -u kute, or the \
          terminal running kute daemon)\n"
     );
+}
+
+#[test]
+fn a_job_with_another_config_runs_here_even_with_a_daemon() {
+    let (tmp, config) = setup();
+    let message = "the daemon got a job meant for another config".into();
+    stand_in_daemon(tmp.path(), kute::ipc::Response::Error { message });
+    let out = Command::new(env!("CARGO_BIN_EXE_kute"))
+        .env("XDG_RUNTIME_DIR", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg"))
+        .arg("--config")
+        .arg(&config)
+        .arg("reindex")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("daemon"));
 }
 
 #[test]

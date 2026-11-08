@@ -4,6 +4,10 @@ kute reads `~/.config/kute/config.toml` (or `$XDG_CONFIG_HOME/kute/config.toml`)
 optional and every key has a default, so you only write the keys you want to change. The daemon
 reads the config when it starts: restart it after an edit (`systemctl --user restart kute`).
 
+`kute --config FILE <command>` uses another file. While the daemon runs, commands such as
+`retranscribe` or `summarize` normally hand their work to it; with a `--config` other than the
+default file they run in the terminal instead, so the other file's settings and archive apply.
+
 Durations are written as strings such as `"20s"`, `"5m"` or `"1h 30m"`.
 
 ## `[user]`

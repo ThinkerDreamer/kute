@@ -19,7 +19,7 @@ use crate::transcribe::parse_languages;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -28,7 +28,8 @@ use std::path::PathBuf;
     about = "Records, transcribes and summarizes your calls, locally"
 )]
 struct Cli {
-    /// Config file (default: ~/.config/kute/config.toml)
+    /// Config file (default: ~/.config/kute/config.toml). With another file, jobs run here
+    /// instead of on the daemon, which uses the default one
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -309,6 +310,7 @@ pub fn run() -> Result<()> {
     }
     let config = Config::load(cli.config.as_deref())?;
     let store = Store::open(config.data_dir()?)?;
+    let daemon_ok = shares_daemon_config(cli.config.as_deref(), Config::default_path().as_deref());
 
     match cli.command {
         Command::Daemon => daemon::run(store, config)?,
@@ -330,6 +332,7 @@ pub fn run() -> Result<()> {
         } => run_job(
             &store,
             &config,
+            daemon_ok,
             &Job::Import {
                 // Absolute, so the job means the same files wherever it runs.
                 me: std::path::absolute(&me)?,
@@ -345,7 +348,7 @@ pub fn run() -> Result<()> {
             let job = Job::Process {
                 id: session.id.clone(),
             };
-            if !queue_on_daemon(&job)? {
+            if !(daemon_ok && queue_on_daemon(&job)?) {
                 // The daemon's worker processes a recording session's closed conversations;
                 // a second process doing the same at the same time would race it.
                 if session.load_meta()?.state == SessionState::Recording {
@@ -370,6 +373,7 @@ pub fn run() -> Result<()> {
         Command::Title { id, title } => run_job(
             &store,
             &config,
+            daemon_ok,
             &Job::Title {
                 id: store.resolve(&id)?.id,
                 title: title.join(" "),
@@ -385,6 +389,7 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
+                    daemon_ok,
                     &Job::Notes {
                         id: session.id,
                         notes: (!clear).then(|| text.join(" ")),
@@ -400,6 +405,7 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
+                    daemon_ok,
                     &Job::Others {
                         id: session.id,
                         name: (!clear).then(|| name.join(" ")),
@@ -440,6 +446,7 @@ pub fn run() -> Result<()> {
                 run_job(
                     &store,
                     &config,
+                    daemon_ok,
                     &Job::Language {
                         id: session.id,
                         languages,
@@ -462,6 +469,7 @@ pub fn run() -> Result<()> {
         } => run_job(
             &store,
             &config,
+            daemon_ok,
             &Job::Summarize {
                 id: store.resolve(&id)?.id,
                 conversation,
@@ -472,13 +480,14 @@ pub fn run() -> Result<()> {
         Command::Retranscribe { id, model, lang } => run_job(
             &store,
             &config,
+            daemon_ok,
             &Job::Retranscribe {
                 id: store.resolve(&id)?.id,
                 model,
                 languages: lang.change()?,
             },
         )?,
-        Command::Reindex => run_job(&store, &config, &Job::Reindex)?,
+        Command::Reindex => run_job(&store, &config, daemon_ok, &Job::Reindex)?,
         Command::Service { .. }
         | Command::Doctor { .. }
         | Command::Debug {
@@ -687,6 +696,19 @@ fn print_status(status: &Status) {
     println!("running: {}", or_dash(&status.running_job));
 }
 
+/// Whether a job may go to the running daemon. The daemon loads the default config file (the
+/// systemd unit passes no `--config`), so only a command using that same file means the
+/// same settings and the same archive. With another `--config`, the job runs here: the
+/// daemon would resolve the session in its own archive and process it with its own
+/// settings.
+fn shares_daemon_config(explicit: Option<&Path>, default: Option<&Path>) -> bool {
+    let Some(explicit) = explicit else {
+        return true;
+    };
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    default.is_some_and(|d| canonical(d).is_some_and(|d| canonical(explicit) == Some(d)))
+}
+
 /// Makes writing to a closed stdout end the process silently, as other command line tools
 /// do, instead of panicking: Rust ignores SIGPIPE, so `kute list | head` would otherwise
 /// fail in `println!`. Not for the daemon, which must survive a client hanging up on it.
@@ -720,9 +742,10 @@ fn queue_on_daemon(job: &Job) -> Result<bool> {
     }
 }
 
-/// Queues a processing job on the daemon, or runs it here when there is no daemon.
-fn run_job(store: &Store, config: &Config, job: &Job) -> Result<()> {
-    if queue_on_daemon(job)? {
+/// Queues a processing job on the daemon, or runs it here when there is no daemon or the
+/// daemon would use other settings (`daemon_ok` false, see [`shares_daemon_config`]).
+fn run_job(store: &Store, config: &Config, daemon_ok: bool, job: &Job) -> Result<()> {
+    if daemon_ok && queue_on_daemon(job)? {
         return Ok(());
     }
     run_foreground(store, config, job)
@@ -859,6 +882,31 @@ fn model_list(store: &Store, config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_default_config_goes_to_the_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("kute").join("config.toml");
+        let other = tmp.path().join("other.toml");
+        std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+        std::fs::write(&default, "").unwrap();
+        std::fs::write(&other, "").unwrap();
+        assert!(shares_daemon_config(None, Some(&default)));
+        assert!(shares_daemon_config(Some(&default), Some(&default)));
+        // The same file by another name.
+        let alias = tmp
+            .path()
+            .join("kute")
+            .join("..")
+            .join("kute")
+            .join("config.toml");
+        assert!(shares_daemon_config(Some(&alias), Some(&default)));
+        assert!(!shares_daemon_config(Some(&other), Some(&default)));
+        assert!(!shares_daemon_config(Some(&other), None));
+        // No default file: the daemon runs on defaults, which no file means for sure.
+        std::fs::remove_file(&default).unwrap();
+        assert!(!shares_daemon_config(Some(&other), Some(&default)));
+    }
 
     fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {
         let mut progress = Progress::new("m", tty);
