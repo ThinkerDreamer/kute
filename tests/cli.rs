@@ -181,3 +181,51 @@ fn a_job_queued_on_the_daemon_says_where_its_result_goes() {
          terminal running kute daemon)\n"
     );
 }
+
+#[test]
+fn output_into_a_closed_pipe_ends_quietly() {
+    use kute::store::{Meta, Store, Trigger, TriggerKind};
+    use std::io::Read;
+    let (tmp, config) = setup();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let start: jiff::Zoned = "2026-10-08T09:00:00+02:00[+02:00]".parse().unwrap();
+    let session = store.create_session(&start).unwrap();
+    let trigger = Trigger {
+        kind: TriggerKind::Import,
+        app_name: None,
+        binary: None,
+    };
+    session
+        .save_meta(&Meta::new(session.id.clone(), start, trigger, "en".into()))
+        .unwrap();
+    // Far more than a pipe holds, so kute is still writing when the reader goes away.
+    std::fs::write(
+        session.transcript_path(),
+        "[00:00] Me: hello\n".repeat(100_000),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kute"))
+        .env("XDG_RUNTIME_DIR", tmp.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["show", "last"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    stdout.read_exact(&mut [0; 16]).unwrap();
+    drop(stdout); // like `| head`
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert!(stderr.is_empty(), "{stderr}");
+    // Ended by SIGPIPE, like any other tool at the head of a closed pipe, not a panic (101).
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(libc::SIGPIPE), "{status}");
+}

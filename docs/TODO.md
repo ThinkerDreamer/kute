@@ -82,9 +82,6 @@ Found in the final review of plan 3 and deferred.
   the loss isn't transcribed unless one was open. Saving `open_conversation_ms` at the loss would
   cover it.
 
-- [ ] **`kute list | head` panics with "Broken pipe".** `println!` panics when stdout closes early.
-  Exit quietly on `BrokenPipe` in the CLI's output (or restore the default SIGPIPE behavior at
-  startup).
 - [ ] **A session is labeled with the first app that opened the mic.** On 2026-10-21 a Zoom call
   ran inside a session labeled "Element", because Element's video room had opened the mic first.
   Consider relabeling when the trigger app's mic closes and another app's stays open.

@@ -276,6 +276,9 @@ impl From<BackendArg> for SummaryBackend {
 pub fn run() -> Result<()> {
     whisper_rs::install_logging_hooks();
     let cli = Cli::parse();
+    if !matches!(cli.command, Command::Daemon) {
+        die_quietly_on_closed_pipe();
+    }
     // The service needs neither the config nor the store, and must work when they don't.
     if let Command::Service { command } = &cli.command {
         return match command {
@@ -682,6 +685,17 @@ fn print_status(status: &Status) {
     println!("queued: {}", status.queued);
     println!("retrying: {}", status.retrying);
     println!("running: {}", or_dash(&status.running_job));
+}
+
+/// Makes writing to a closed stdout end the process silently, as other command line tools
+/// do, instead of panicking: Rust ignores SIGPIPE, so `kute list | head` would otherwise
+/// fail in `println!`. Not for the daemon, which must survive a client hanging up on it.
+fn die_quietly_on_closed_pipe() {
+    // SAFETY: setting a signal's disposition to the default has no preconditions, and
+    // runs before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 }
 
 /// Hands a processing job to the daemon if it is running, and prints its reply. Returns
