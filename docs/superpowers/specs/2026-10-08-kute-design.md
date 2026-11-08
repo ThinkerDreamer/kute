@@ -217,11 +217,15 @@ later per-speaker labels on the others side (`Others (A)`).
 - **Session alive:** any non-ignored mic stream exists, **or** one of the session's
   *bound output nodes* still exists. A bound output node is a `Stream/Output/Audio` node of
   the trigger app (same binary and `application.name`) that was present at some moment
-  while a mic stream was alive, and it counts only while its state is `running`: the Jitsi
+  while a mic stream was alive, but not in the last snapshot before the session's mic
+  appeared, and it counts only while its state is `running`: the Jitsi
   Meet app's output stream stayed `running` through silence and went `idle` the moment the
   user left the room (spike, section 12). The second clause keeps a session alive if an app closes its
   mic on mute. It is bound to specific nodes, not to the app, so a YouTube video started in the same
-  Firefox after leaving the call opens a new node and does not keep the session alive.
+  Firefox after leaving the call opens a new node and does not keep the session alive. A
+  node already playing when the call starts is not bound either: browsers give every tab
+  one app, so a tab playing sound before a Meet call would otherwise keep the session alive
+  long after the call.
   Nodes are tracked by `object.serial`, never by node ID: PipeWire reuses IDs within
   seconds (the spike saw ID 85 go from Jitsi's mic to a Plasma meter).
 - **Short gaps don't count:** a mic stream that closes and is replaced within 2 s keeps the

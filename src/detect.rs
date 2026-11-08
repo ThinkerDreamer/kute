@@ -64,6 +64,9 @@ pub struct Detector {
     trigger: Option<App>,
     /// Serials of the trigger app's output streams seen while a mic stream was alive.
     bound: BTreeSet<u64>,
+    /// While Idle, the output streams of the last snapshot without a live mic. They were
+    /// playing before the call, such as another browser tab, so they are never bound.
+    before_call: BTreeSet<u64>,
     /// The last snapshot, so `tick` can judge liveness between snapshots.
     last: Vec<Stream>,
     started_ms: u64,
@@ -108,6 +111,7 @@ impl Detector {
             paused: false,
             trigger: None,
             bound: BTreeSet::new(),
+            before_call: BTreeSet::new(),
             last: Vec::new(),
             started_ms: 0,
             dead_since: None,
@@ -125,6 +129,9 @@ impl Detector {
         self.lost = false;
         self.last = streams.to_vec();
         if self.phase == Phase::Idle {
+            if self.live_mics().next().is_none() {
+                self.before_call = self.outputs().map(|s| s.serial).collect();
+            }
             return self.start_if_called(now_ms);
         }
         self.advance(now_ms)
@@ -311,22 +318,25 @@ impl Detector {
             .filter(|s| s.kind == StreamKind::Mic && !self.ignored(s))
     }
 
+    fn outputs(&self) -> impl Iterator<Item = &Stream> {
+        self.last.iter().filter(|s| s.kind == StreamKind::Output)
+    }
+
     /// Whether the last snapshot keeps the session alive, binding the trigger app's output
-    /// streams while a mic stream is there.
+    /// streams while a mic stream is there, except those already playing before the call.
     fn alive(&mut self) -> bool {
         let mic = self.live_mics().next().is_some();
         if mic && let Some(trigger) = &self.trigger {
-            let outputs = self
-                .last
-                .iter()
-                .filter(|s| s.kind == StreamKind::Output && s.app == *trigger)
-                .map(|s| s.serial);
+            let outputs: Vec<u64> = self
+                .outputs()
+                .filter(|s| s.app == *trigger && !self.before_call.contains(&s.serial))
+                .map(|s| s.serial)
+                .collect();
             self.bound.extend(outputs);
         }
         mic || self
-            .last
-            .iter()
-            .any(|s| s.kind == StreamKind::Output && s.running && self.bound.contains(&s.serial))
+            .outputs()
+            .any(|s| s.running && self.bound.contains(&s.serial))
     }
 
     /// Moves an automatic session along: commits, confirms gaps, runs out the grace.
@@ -573,6 +583,31 @@ mod tests {
                 101_000
             )
             .is_empty()
+        );
+        assert!(d.tick(102_000).is_empty());
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn output_playing_before_the_call_is_not_bound() {
+        // Another tab of the same browser plays sound before a Meet call starts in it.
+        let mut d = Detector::new(&cfg(), 1);
+        assert!(d.streams(&[out(50, firefox(), true)], 0).is_empty());
+        d.streams(&[out(50, firefox(), true), mic(60, firefox())], 10_000);
+        d.streams(
+            &[
+                out(50, firefox(), true),
+                mic(60, firefox()),
+                out(70, firefox(), true),
+            ],
+            15_000,
+        );
+        assert_eq!(d.tick(30_000), vec![Action::Commit]);
+        // Leaving the call closes the mic and idles the call's output; the tab plays on.
+        d.streams(
+            &[out(50, firefox(), true), out(70, firefox(), false)],
+            100_000,
         );
         assert!(d.tick(102_000).is_empty());
         assert_eq!(d.phase(), Phase::Grace);

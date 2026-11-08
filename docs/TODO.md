@@ -104,8 +104,21 @@ Found in the final review of plan 3 and deferred.
   is per read, not per request (`src/ipc.rs`).
 - [ ] **Old indexes keep the binary name as the app label.** Indexes built before 45316c0 store
   `electron` instead of the app name until `kute reindex`.
-- [ ] **Firefox mic check during a Firefox video.** The mic check binds the video's running
-  output, which keeps the session alive (spec open question).
+- [x] **Firefox mic check during a Firefox video.** The mic check bound the video's running
+  output, which kept the session alive. Outputs already playing before the mic opened are no
+  longer bound.
+- [ ] **A tab that starts playing during a browser call still binds.** Every tab of a browser is
+  one app, so sound started in another tab while the call's mic is open (a video, a speech
+  playground) keeps the session alive after the call until it stops. Tabs can't be told apart
+  by app, PID or client; maybe `media.name`, or a cap on how long bound outputs alone keep a
+  session alive.
+- [ ] **After `stop`, a call still in progress can't start a session on its own.** `stop` blocks
+  automatic Start until no mic has been seen for 2 s, so if the user stops by mistake (or stops
+  a session the call didn't trigger) while the call's mic stays open, only `kute record` records
+  the rest of it, and that session is manual.
+- [ ] **Manual sessions never end on their own.** `kute record` ignores liveness, so a manual
+  session runs until `stop` even after the call is over. Consider ending it like an automatic
+  one once a call it overlapped has ended, or at least notifying after a long silence.
 
 ## Packaging
 
