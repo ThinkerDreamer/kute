@@ -7,7 +7,8 @@ use crate::index::Index;
 use crate::models;
 use crate::render;
 use crate::store::{
-    CompressionStage, Meta, Session, SessionState, Stage, Step, Store, Track, write_atomic,
+    CompressionStage, Meta, Session, SessionState, SkipReason, Stage, Step, Store, Track,
+    write_atomic,
 };
 use crate::summarize::{PromptContext, Summarizer, build_prompt};
 use crate::transcribe::command::CommandTranscriber;
@@ -315,19 +316,31 @@ impl Pipeline<'_> {
         let lines = render::conversation_lines(&conv, &me, &others);
         let summary_path = session.conversation_summary_path(n);
 
-        let summarizer = match self.summarizer {
-            Some(s) if render::word_count(&lines) >= self.config.summary.min_words => s,
-            _ => {
-                if summary_path.is_file() {
-                    fs::remove_file(&summary_path)?;
-                }
-                let c = meta.conversation_mut(n).expect("n comes from meta");
-                c.stage = Stage::Skipped;
-                c.clear_error();
-                *meta = save_conversation(session, meta, n)?;
-                return Ok(false);
-            }
+        let words = render::word_count(&lines);
+        let min_words = self.config.summary.min_words;
+        let skip_reason = match self.summarizer {
+            None => Some(SkipReason::NoSummarizer),
+            Some(_) if words < min_words => Some(SkipReason::TooShort { words, min_words }),
+            Some(_) => None,
         };
+        if let Some(reason) = skip_reason {
+            if summary_path.is_file() {
+                fs::remove_file(&summary_path)?;
+            }
+            note(
+                self.quiet,
+                &format!(
+                    "{}: skipping the summary of conversation {n}: {reason}",
+                    meta.id
+                ),
+            );
+            meta.conversation_mut(n)
+                .expect("n comes from meta")
+                .skip(reason);
+            *meta = save_conversation(session, meta, n)?;
+            return Ok(false);
+        }
+        let summarizer = self.summarizer.expect("checked above");
 
         note(
             self.quiet,
@@ -807,11 +820,42 @@ mod tests {
         let meta = f.session.load_meta().unwrap();
         assert_eq!(meta.conversations[0].languages.others, None);
         assert_eq!(meta.conversations[0].stage, Stage::Skipped);
+        assert_eq!(
+            meta.conversations[0].skip_reason,
+            Some(SkipReason::NoSummarizer)
+        );
         let transcript = std::fs::read_to_string(f.session.transcript_path()).unwrap();
         assert!(
             transcript.contains("Me: level 25") && !transcript.contains("Others:"),
             "{transcript}"
         );
+    }
+
+    #[test]
+    fn a_short_conversation_records_why_it_has_no_summary() {
+        let mut f = fixture(2.0, 2.0, 2_000);
+        f.config.summary.min_words = 1_000;
+        let mut asr = FakeProvider::new();
+        let sum = summarizer(false);
+        pipeline(&f, &mut asr, Some(&sum))
+            .process(&f.session)
+            .unwrap();
+        assert!(sum.prompts.borrow().is_empty());
+        let c = f.session.load_meta().unwrap().conversations.remove(0);
+        assert_eq!(c.stage, Stage::Skipped);
+        let Some(SkipReason::TooShort { words, min_words }) = c.skip_reason else {
+            panic!("expected too short, got {:?}", c.skip_reason);
+        };
+        assert!(words > 0 && words < 1_000);
+        assert_eq!(min_words, 1_000);
+
+        // Summarizing again once it's long enough forgets the reason.
+        f.config.summary.min_words = 1;
+        pipeline(&f, &mut asr, Some(&sum))
+            .resummarize(&f.session, None)
+            .unwrap();
+        let c = f.session.load_meta().unwrap().conversations.remove(0);
+        assert_eq!((c.stage, c.skip_reason), (Stage::Summarized, None));
     }
 
     #[test]

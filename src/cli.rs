@@ -13,7 +13,7 @@ use crate::pipeline;
 use crate::pw::trace;
 use crate::render;
 use crate::service;
-use crate::store::{LanguageChange, SessionState, Store, Track};
+use crate::store::{LanguageChange, SessionState, SkipReason, Stage, Store, Track};
 use crate::time;
 use crate::transcribe::parse_languages;
 use anyhow::{Context, Result, bail};
@@ -828,6 +828,14 @@ fn list(store: &Store, since: Option<&str>) -> Result<()> {
             meta.app_label(),
             meta.conversations.len(),
         );
+        // Without a summarizer every conversation is skipped, and that is no news.
+        for c in &meta.conversations {
+            if c.stage == Stage::Skipped
+                && let Some(reason @ SkipReason::TooShort { .. }) = c.skip_reason
+            {
+                println!("    conversation {}: no summary, {reason}", c.n);
+            }
+        }
         shown += 1;
     }
     if shown == 0 {

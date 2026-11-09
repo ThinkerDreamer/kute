@@ -186,6 +186,10 @@ pub struct Conversation {
     pub failed_step: Option<Step>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why the summary was skipped, when `stage` is `skipped`. Sessions from before this was
+    /// recorded have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
     #[serde(default)]
     pub attempts: u32,
 }
@@ -198,6 +202,30 @@ pub enum Stage {
     Summarized,
     Skipped,
     Failed,
+}
+
+/// Why a conversation has no summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SkipReason {
+    /// `summary.backend` is `none`.
+    NoSummarizer,
+    /// Fewer words than `summary.min_words`.
+    TooShort { words: usize, min_words: usize },
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::NoSummarizer => {
+                write!(f, "no summarizer is set up (summary.backend is \"none\")")
+            }
+            SkipReason::TooShort { words, min_words } => write!(
+                f,
+                "too short to summarize: {words} words, summary.min_words is {min_words}"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +344,7 @@ impl Conversation {
             summarizer: None,
             failed_step: None,
             error: None,
+            skip_reason: None,
             attempts: 0,
         }
     }
@@ -324,12 +353,22 @@ impl Conversation {
         self.stage = Stage::Failed;
         self.failed_step = Some(step);
         self.error = Some(format!("{err:#}"));
+        self.skip_reason = None;
         self.attempts += 1;
     }
 
+    /// Clears what an earlier failure or skip left behind, as the stage moves on.
     pub fn clear_error(&mut self) {
         self.failed_step = None;
         self.error = None;
+        self.skip_reason = None;
+    }
+
+    /// Marks the summary as skipped, saying why.
+    pub fn skip(&mut self, reason: SkipReason) {
+        self.clear_error();
+        self.stage = Stage::Skipped;
+        self.skip_reason = Some(reason);
     }
 
     pub fn needs_transcription(&self) -> bool {
@@ -395,6 +434,25 @@ mod tests {
         let text = toml::to_string_pretty(&m).unwrap();
         assert!(text.contains("open_conversation_ms = 12000"), "{text}");
         assert_eq!(toml::from_str::<Meta>(&text).unwrap(), m);
+    }
+
+    #[test]
+    fn skip_reason_round_trips_and_clears() {
+        let mut c = Conversation::new(1, 0, 10);
+        c.skip(SkipReason::TooShort {
+            words: 12,
+            min_words: 80,
+        });
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(text.contains("kind = \"too_short\""), "{text}");
+        assert_eq!(toml::from_str::<Conversation>(&text).unwrap(), c);
+        assert_eq!(
+            c.skip_reason.unwrap().to_string(),
+            "too short to summarize: 12 words, summary.min_words is 80"
+        );
+        c.stage = Stage::Transcribed;
+        c.clear_error();
+        assert_eq!(c.skip_reason, None);
     }
 
     #[test]

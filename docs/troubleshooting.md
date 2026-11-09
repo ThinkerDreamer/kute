@@ -80,7 +80,9 @@ run `kute process <id>` to finish it right away.
 ## No summaries
 
 - Summaries are off until `summary.backend` is set. See [Configuration](configuration.md#summary).
-- Conversations shorter than `summary.min_words` (80 words) are skipped on purpose.
+- Conversations shorter than `summary.min_words` (80 words) are skipped on purpose. `kute list`
+  names them under their session, with their word count, and `meta.toml` records the reason as
+  `skip_reason`.
 - The log says why a summary failed: a command not found (it isn't on the daemon's `PATH`), an
   API key variable that isn't set (systemd doesn't see your shell's environment), a timeout.
 - Run `kute summarize last` to try again once it's fixed.
