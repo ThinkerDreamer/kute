@@ -207,6 +207,10 @@ min_words = 80                    # shorter conversations aren't summarized
 # model = "qwen3:8b"
 # api_key_env = "OPENAI_API_KEY"
 
+[processing]
+# wait_for_recording_end = true   # transcribe after the recording, not as each conversation closes
+# low_priority = true             # run transcription and summaries at the lowest CPU/I/O priority
+
 [notify]
 open = ["xdg-open"]               # opens summary.md when you click "Summary ready"
 

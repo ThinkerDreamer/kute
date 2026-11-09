@@ -17,6 +17,7 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub notify: NotifyConfig,
     pub tray: TrayConfig,
+    pub processing: ProcessingConfig,
     /// The file this config was read from, canonicalized; `None` for the defaults (no file).
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -192,6 +193,18 @@ impl Default for TrayConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+/// How the daemon's worker shares the machine with the call it is recording.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProcessingConfig {
+    /// Hold transcriptions and summaries until the recording ends, instead of starting on
+    /// each conversation as soon as it closes. Edits (title, notes, languages) still run.
+    pub wait_for_recording_end: bool,
+    /// Run the worker at the lowest CPU and I/O priority (nice 19, idle I/O class), so it
+    /// gets only the time other programs leave over.
+    pub low_priority: bool,
 }
 
 impl Config {
@@ -388,6 +401,15 @@ mod tests {
                 .end_manual
         );
         assert!(c.capture.mic.is_none());
+    }
+
+    #[test]
+    fn processing_starts_right_away_at_normal_priority_unless_set() {
+        let c = Config::parse("").unwrap();
+        assert!(!c.processing.wait_for_recording_end && !c.processing.low_priority);
+        let c = Config::parse("[processing]\nwait_for_recording_end = true\nlow_priority = true\n")
+            .unwrap();
+        assert!(c.processing.wait_for_recording_end && c.processing.low_priority);
     }
 
     #[test]

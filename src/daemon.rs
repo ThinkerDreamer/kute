@@ -176,7 +176,8 @@ impl Daemon {
         for (_, job) in due {
             self.enqueue(job)?;
         }
-        Ok(())
+        // Work held for a recording that ended without queuing anything new.
+        self.start_next()
     }
 
     /// Ends a session whose recording failed. That is not the user's stop, so a call still
@@ -436,8 +437,15 @@ impl Daemon {
         self.start_next()
     }
 
+    /// Starts the next queued job if the worker is free. With
+    /// `processing.wait_for_recording_end`, audio work waits while a session records; edits
+    /// queue ahead of it, so they still run.
     fn start_next(&mut self) -> Result<()> {
         if self.running.is_some() {
+            return Ok(());
+        }
+        let holding = self.config.processing.wait_for_recording_end && self.live.is_some();
+        if holding && self.queue.front().is_some_and(|job| !job.edits_details()) {
             return Ok(());
         }
         let Some(job) = self.queue.pop_front() else {
@@ -509,6 +517,8 @@ impl Daemon {
                     live.discard().with_context(|| format!("discarding {id}"))?;
                     eprintln!("kute: discarded {id}");
                     self.forget(&id, closed);
+                    // Work held back for the recording (`wait_for_recording_end`) may go.
+                    self.start_next()?;
                 }
             }
         }
@@ -782,6 +792,48 @@ mod tests {
             worker.try_recv(),
             Ok(WorkerMsg::Run(Job::Process { id: queued })) if queued == id
         ));
+    }
+
+    #[test]
+    fn wait_for_recording_end_holds_audio_work_but_not_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let (tx, worker) = mpsc::channel();
+        let mut config = Config::default();
+        config.processing.wait_for_recording_end = true;
+        let mut d = Daemon::new(
+            store.clone(),
+            config,
+            Box::new(FakeSource::default()),
+            run_vad(),
+            tx,
+        );
+        d.control(Request::Record { title: None }, 0).unwrap();
+        let id = d.live_id();
+        d.enqueue(Job::Reindex).unwrap();
+        d.handle(Event::Tick, 1_000).unwrap();
+        assert!(worker.try_recv().is_err(), "nothing runs while recording");
+
+        let title = Job::Title {
+            id: id.clone(),
+            title: "Planning".into(),
+        };
+        d.enqueue(title.clone()).unwrap();
+        assert!(matches!(worker.try_recv(), Ok(WorkerMsg::Run(job)) if job == title));
+        d.running = None;
+        d.handle(Event::Tick, 2_000).unwrap();
+        assert!(
+            worker.try_recv().is_err(),
+            "the edit doesn't let audio work through"
+        );
+
+        d.control(Request::Stop, 3_000).unwrap();
+        assert!(d.live.is_none());
+        assert!(matches!(
+            worker.try_recv(),
+            Ok(WorkerMsg::Run(Job::Reindex))
+        ));
+        assert_eq!(d.queue, [Job::Process { id }]);
     }
 
     #[test]

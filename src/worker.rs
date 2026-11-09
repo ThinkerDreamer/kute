@@ -54,6 +54,9 @@ fn spawn_with(
     std::thread::Builder::new()
         .name("kute-worker".into())
         .spawn(move || {
+            if config.processing.low_priority {
+                lower_priority();
+            }
             let mut asr = None;
             while let Ok(WorkerMsg::Run(job)) = rx.recv() {
                 let ran = catch_unwind(AssertUnwindSafe(|| run(&store, &config, &mut asr, &job)));
@@ -90,6 +93,39 @@ fn spawn_with(
             }
         })
         .expect("spawning the worker thread")
+}
+
+/// Puts the calling thread at the lowest CPU and I/O priority: nice 19 and the idle I/O
+/// class. Threads it starts (the transcriber's) and programs it runs (a `command` backend
+/// or summarizer) inherit both. Failing only costs the setting, so it is just logged.
+fn lower_priority() {
+    // SAFETY: gettid has no preconditions.
+    let tid = unsafe { libc::gettid() };
+    // SAFETY: plain syscalls on this thread's own scheduling attributes.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 19) } != 0 {
+        eprintln!(
+            "kute: could not lower the worker's CPU priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+    const IOPRIO_CLASS_IDLE: libc::c_int = 3;
+    const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
+    // SAFETY: as above; ioprio_set takes three integers.
+    let set = unsafe {
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            IOPRIO_WHO_PROCESS,
+            tid,
+            IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT,
+        )
+    };
+    if set != 0 {
+        eprintln!(
+            "kute: could not lower the worker's I/O priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 /// The jobs to queue at daemon start: one `Process` for every session left in `processing`
@@ -264,5 +300,49 @@ mod tests {
         assert!(done_rx.recv().unwrap().result.is_ok());
         drop(tx);
         handle.join().unwrap();
+    }
+
+    /// The nice value and I/O priority class of the calling thread.
+    fn priority() -> (i32, i64) {
+        // SAFETY: as in `lower_priority`.
+        unsafe {
+            let tid = libc::gettid();
+            let nice = libc::getpriority(libc::PRIO_PROCESS, tid as libc::id_t);
+            let ioprio = libc::syscall(libc::SYS_ioprio_get, 1, tid);
+            (nice, ioprio >> 13)
+        }
+    }
+
+    #[test]
+    fn low_priority_lowers_only_the_worker() {
+        fn run(
+            _: &Store,
+            _: &Config,
+            _: &mut Option<Box<dyn AsrProvider>>,
+            _: &Job,
+        ) -> Result<Outcome> {
+            let (nice, class) = priority();
+            Ok(Outcome {
+                message: format!("{nice} {class}"),
+                ..Outcome::default()
+            })
+        }
+        let ran = |low_priority| {
+            let (_tmp, store) = store();
+            let mut config = Config::default();
+            config.processing.low_priority = low_priority;
+            let (tx, rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let handle = spawn_with(store, config, rx, done_tx, run);
+            tx.send(WorkerMsg::Run(Job::Reindex)).unwrap();
+            let message = done_rx.recv().unwrap().result.unwrap().message;
+            drop(tx);
+            handle.join().unwrap();
+            message
+        };
+        let (nice, _) = priority();
+        assert_eq!(ran(true), "19 3");
+        assert_ne!(ran(false), "19 3");
+        assert_eq!(priority().0, nice, "the caller's priority is unchanged");
     }
 }

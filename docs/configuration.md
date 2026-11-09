@@ -157,6 +157,24 @@ backend = "anthropic"
 A daemon started by systemd doesn't inherit your shell's environment: see
 [Installing](install.md#running-the-daemon-at-login) for passing the key to it.
 
+## `[processing]`
+
+By default kute transcribes (and summarizes) each conversation as soon as it closes, even while
+the call goes on, so a long session is mostly done when it ends. On a machine where that work
+is noticeable during a call (a busy CPU, a loud fan next to an open mic), these change when and
+how hard the work runs.
+
+| Key | Default | |
+|---|---|---|
+| `wait_for_recording_end` | `false` | Hold transcriptions and summaries until the recording ends, then run them. Edits (title, notes, others, languages) still apply right away, and a job already running when a recording starts finishes. Jobs queued by hand (`kute retranscribe`) wait too; `kute status` counts them as queued. |
+| `low_priority` | `false` | Run the work at the lowest CPU and I/O priority (nice 19, idle I/O class), including a `command` backend or summarizer. Other programs, the call included, get the CPU first. It doesn't make the work smaller: on an otherwise idle machine it still uses the CPU fully, so to keep the fan quiet during a call use `wait_for_recording_end`. |
+
+```toml
+[processing]
+wait_for_recording_end = true
+low_priority = true
+```
+
 ## `[notify]`
 
 | Key | Default | |
