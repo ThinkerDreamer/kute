@@ -100,7 +100,7 @@ writes them to the session's `summary.md`.
 | `min_words` | `80` | Conversations with fewer words aren't summarized. |
 | `prompt` | built in | Path to your own prompt template (Markdown). See [the default](../src/summarize/prompt.md). |
 | `timeout` | `"10m"` | How long one summary may take. |
-| `command` | | `command` backend: the program and its arguments. |
+| `command` | | `command` backend: the program and its arguments. A leading `~` in any of them is expanded. |
 | `base_url` | see below | `openai` and `anthropic` backends: the API's base URL. |
 | `model` | see below | `openai` (required) and `anthropic` backends: the model name. |
 | `api_key_env` | see below | The name of the environment variable that holds the API key. Never put the key itself in the config. |

@@ -1,9 +1,11 @@
 //! Runs any command: the prompt goes to stdin, stdout is the summary.
 
 use super::Summarizer;
+use crate::config::expand_tilde;
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -20,6 +22,17 @@ impl CommandSummarizer {
     }
 }
 
+impl CommandSummarizer {
+    /// The program and its arguments, with a leading `~` expanded as in `transcribe.command`.
+    fn command_line(&self) -> (PathBuf, Vec<PathBuf>) {
+        let expand = |a: &String| expand_tilde(Path::new(a));
+        (
+            expand(&self.argv[0]),
+            self.argv[1..].iter().map(expand).collect(),
+        )
+    }
+}
+
 impl Summarizer for CommandSummarizer {
     fn name(&self) -> String {
         format!("command: {}", self.argv.join(" "))
@@ -27,8 +40,9 @@ impl Summarizer for CommandSummarizer {
 
     fn summarize(&self, prompt: &str) -> Result<String> {
         let program = &self.argv[0];
-        let mut child = Command::new(program)
-            .args(&self.argv[1..])
+        let (path, args) = self.command_line();
+        let mut child = Command::new(path)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -199,6 +213,22 @@ mod tests {
                 .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z')),
             Err(_) => false,
         }
+    }
+
+    #[test]
+    fn a_leading_tilde_is_expanded() {
+        let s = CommandSummarizer::new(
+            vec!["~/bin/summarize".into(), "~/prompt.md".into(), "-p".into()],
+            Duration::from_secs(1),
+        );
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            s.command_line(),
+            (
+                home.join("bin/summarize"),
+                vec![home.join("prompt.md"), PathBuf::from("-p")]
+            )
+        );
     }
 
     #[test]
