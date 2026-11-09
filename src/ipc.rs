@@ -81,6 +81,9 @@ pub struct Incoming {
     pub reply: Sender<Response>,
 }
 
+/// How the daemon's reply to a request it can't parse begins.
+pub const BAD_REQUEST: &str = "bad request:";
+
 pub fn socket_path() -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|d| !d.is_empty())
@@ -141,7 +144,7 @@ fn handle(mut stream: UnixStream, tx: &Sender<Incoming>, reply_timeout: Duration
     }
     let response = match serde_json::from_str::<Request>(line.trim()) {
         Err(e) => Response::Error {
-            message: format!("bad request: {e}"),
+            message: format!("{BAD_REQUEST} {e}"),
         },
         Ok(request) => {
             let (reply, answer) = channel();

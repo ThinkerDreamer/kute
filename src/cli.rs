@@ -735,9 +735,11 @@ fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
                 return Ok(false);
             }
         }
-        // A daemon from before `Identity` (not restarted since an upgrade): queue the job, as
-        // kute did then.
-        Some(Response::Error { .. }) => {}
+        // A daemon from before `Identity` (not restarted since an upgrade) can't parse the
+        // request: queue the job, as kute did then. Any other error (a daemon too busy to
+        // answer, or shutting down) says nothing about its config, so it stops here.
+        Some(Response::Error { message }) if message.starts_with(ipc::BAD_REQUEST) => {}
+        Some(Response::Error { message }) => bail!("{message}"),
         Some(_) => bail!("the daemon sent another reply instead of its identity"),
     }
     match ipc::request(&path, &Request::Job { job: job.clone() })? {

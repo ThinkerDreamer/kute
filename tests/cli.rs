@@ -162,19 +162,29 @@ fn stand_in_daemon(
     config: Option<&std::path::Path>,
     archive: &std::path::Path,
 ) -> std::sync::mpsc::Receiver<kute::jobs::Job> {
+    let config = config.map(|c| std::fs::canonicalize(c).unwrap());
+    stand_in_daemon_answering(
+        runtime_dir,
+        kute::ipc::Response::Identity {
+            config,
+            archive: archive.to_path_buf(),
+        },
+    )
+}
+
+/// Like [`stand_in_daemon`], answering `Identity` with `identity`.
+fn stand_in_daemon_answering(
+    runtime_dir: &std::path::Path,
+    identity: kute::ipc::Response,
+) -> std::sync::mpsc::Receiver<kute::jobs::Job> {
     use kute::ipc::{Request, Response};
     let (tx, rx) = std::sync::mpsc::channel::<kute::ipc::Incoming>();
     kute::ipc::serve(&runtime_dir.join("kute.sock"), tx).unwrap();
-    let config = config.map(|c| std::fs::canonicalize(c).unwrap());
-    let archive = archive.to_path_buf();
     let (jobs, queued) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for incoming in rx {
             let reply = match incoming.request {
-                Request::Identity => Response::Identity {
-                    config: config.clone(),
-                    archive: archive.clone(),
-                },
+                Request::Identity => identity.clone(),
                 Request::Job { job } => {
                     let message = format!("queued {job}");
                     let _ = jobs.send(job);
@@ -229,6 +239,37 @@ fn a_job_with_the_same_config_but_another_archive_runs_here() {
     let out = kute(&config, &["reindex"]);
     assert!(
         out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(queued.try_recv().is_err(), "the daemon got the job");
+}
+
+#[test]
+fn a_daemon_too_old_for_identity_still_gets_the_job() {
+    use kute::ipc::{BAD_REQUEST, Response};
+    let (tmp, config) = setup();
+    let message = format!("{BAD_REQUEST} unknown variant `identity`");
+    let queued = stand_in_daemon_answering(tmp.path(), Response::Error { message });
+    let out = kute(&config, &["reindex"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(queued.try_recv().unwrap(), kute::jobs::Job::Reindex);
+}
+
+#[test]
+fn a_daemon_that_does_not_answer_identity_gets_no_job() {
+    use kute::ipc::Response;
+    let (tmp, config) = setup();
+    let message = "the daemon did not answer".into();
+    let queued = stand_in_daemon_answering(tmp.path(), Response::Error { message });
+    let out = kute(&config, &["reindex"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the daemon did not answer"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
