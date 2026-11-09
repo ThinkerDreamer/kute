@@ -21,19 +21,28 @@ download once with `kute model download` before the first transcription (see [Mo
   Without a GPU backend it runs on the CPU. That works, but a long call takes a while; pick a
   smaller model (see [Models](#models)).
 
+## From crates.io
+
+```bash
+cargo install kute                                           # Vulkan
+# cargo install kute --no-default-features --features cuda   # CUDA
+# cargo install kute --no-default-features                   # CPU only
+```
+
 ## From source
+
+To build the latest `main` instead of a release:
 
 ```bash
 git clone https://github.com/ThinkerDreamer/kute
 cd kute
-cargo install --path .                                      # Vulkan
-# cargo install --path . --no-default-features --features cuda   # CUDA
-# cargo install --path . --no-default-features                    # CPU only
+cargo install --path .         # same feature flags as above
 ```
 
-This puts `kute` in `~/.cargo/bin`. A local build compiles whisper.cpp for your own CPU
-(`-march=native`), which is the fastest option. If you build a binary to run on other machines,
-set `GGML_NATIVE=OFF` first, or it may crash with "illegal instruction" on a different CPU.
+Either way, this puts `kute` in `~/.cargo/bin`. A local build compiles whisper.cpp for your own
+CPU (`-march=native`), which is the fastest option. If you build a binary to run on other
+machines, set `GGML_NATIVE=OFF` first, or it may crash with "illegal instruction" on a different
+CPU.
 
 ## With Nix
 
@@ -93,8 +102,7 @@ Run only one daemon at a time. To try `kute daemon` in a terminal, stop the serv
 ## Updating
 
 ```bash
-git pull
-cargo install --path .
+cargo install kute                     # or, in a clone: git pull && cargo install --path .
 systemctl --user restart kute
 ```
 

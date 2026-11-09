@@ -61,7 +61,7 @@ import recordings made elsewhere. See
 ## Install
 
 ```bash
-cargo install --path .
+cargo install kute         # or `cargo install --path .` in a clone
 kute model download        # large-v3-turbo (1.6 GB) and the Silero VAD model
 kute doctor                # checks PipeWire, ffmpeg, the GPU backend, models and the summarizer
 ```
