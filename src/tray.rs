@@ -262,10 +262,19 @@ fn outdate_icon_cache(data: &std::path::Path) -> Result<()> {
     let Ok(cache) = std::fs::metadata(theme.join("icon-theme.cache")) else {
         return Ok(());
     };
-    if cache.modified()? < std::fs::metadata(&theme)?.modified()? {
+    // GTK compares whole seconds, and trusts a cache from the same second as the folder.
+    let secs = |t: std::time::SystemTime| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    };
+    let cache = cache.modified()?;
+    if secs(cache) < secs(std::fs::metadata(&theme)?.modified()?) {
         return Ok(());
     }
-    std::fs::File::open(&theme)?.set_modified(std::time::SystemTime::now())?;
+    // Past the cache's second even when the cache claims to be from the future.
+    let past_cache = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs(cache) + 1);
+    let time = std::time::SystemTime::now().max(past_cache);
+    std::fs::File::open(&theme)?.set_modified(time)?;
     Ok(())
 }
 
@@ -712,6 +721,14 @@ mod tests {
         outdate_icon_cache(data.path()).unwrap();
         assert!(modified(&theme) > modified(&cache));
         assert!(cache.exists(), "the cache is not kute's to remove");
+
+        // A cache from the future, or from the folder's own second, is still outdated.
+        let ahead = now + Duration::from_secs(3600);
+        set(&cache, ahead);
+        set(&theme, ahead);
+        outdate_icon_cache(data.path()).unwrap();
+        let whole = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        assert!(whole(modified(&theme)) > whole(modified(&cache)));
     }
 
     #[test]
