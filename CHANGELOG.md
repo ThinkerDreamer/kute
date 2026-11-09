@@ -5,6 +5,15 @@ All notable changes to kute are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
 breaking change bumps the minor version and a fix bumps the patch version.
 
+## [0.4.1] - 2026-11-09
+
+### Fixed
+
+- **summary:** Expand a leading ~ in summary.command
+- **cli:** Open the session folder with notify.open
+- **doctor:** Don't describe Whisper's GPU for a command backend
+- **doctor:** Check notify.open's program instead of xdg-open
+
 ## [0.4.0] - 2026-11-09
 
 ### Added
@@ -134,6 +143,7 @@ breaking change bumps the minor version and a fix bumps the patch version.
 
 - Install, configuration, privacy, troubleshooting and contributing guides ([#1](https://github.com/ThinkerDreamer/kute/pull/1))
 
+[0.4.1]: https://github.com/ThinkerDreamer/kute/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ThinkerDreamer/kute/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ThinkerDreamer/kute/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThinkerDreamer/kute/compare/v0.1.0...v0.2.0
