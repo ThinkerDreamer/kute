@@ -64,7 +64,7 @@ kute always records the default output's monitor as the "Others" track.
 | `command` | | `command` backend: the program and its arguments. |
 | `model` | `"large-v3-turbo"` | `whisper` backend: a name from `kute model list`, or a path to a ggml `.bin` file. |
 | `language` | `"auto"` | `"auto"` detects the language of each speech chunk, so mixed-language calls work. Set a code such as `"it"` to force one, or several such as `"ru,en"` to detect only among those. A session's own setting (`kute language`, for both tracks or one) wins. |
-| `gpu` | `true` | Set to `false` to transcribe on the CPU even when the build has a GPU backend. `kute doctor --bench` measures which is faster and can set it. |
+| `gpu` | unset | Unset, kute transcribes on a discrete GPU and on the CPU when the only GPU is integrated, which is often slower than a desktop CPU. `true` or `false` forces the GPU or the CPU. `kute doctor --bench` measures which is faster and can set it. |
 
 Every backend uses kute's own speech detection (Silero VAD) to cut the audio into chunks, so
 the VAD model is needed either way.

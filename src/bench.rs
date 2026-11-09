@@ -6,6 +6,7 @@
 
 use crate::audio;
 use crate::config::Config;
+use crate::gpu;
 use crate::ipc::{self, Request, Response};
 use crate::models;
 use crate::store::write_atomic;
@@ -61,14 +62,14 @@ pub fn run(opts: Options) -> Result<()> {
         }
     );
 
-    let Some(device) = gpu_device() else {
+    let Some(device) = gpu::device() else {
         println!(
             "{backend} finds no GPU, so transcription runs on the CPU whatever transcribe.gpu \
              says; nothing to compare."
         );
         return Ok(());
     };
-    let gpu_label = format!("GPU ({backend}, {device})");
+    let gpu_label = format!("GPU ({backend}, {})", device.name);
     let gpu = time_device(
         &gpu_label,
         &model_path,
@@ -96,8 +97,15 @@ pub fn run(opts: Options) -> Result<()> {
         println!("The CPU is {ratio:.1}x as fast as the GPU.");
     }
     let best = if use_gpu { "GPU" } else { "CPU" };
-    if config.transcribe.gpu == use_gpu {
-        println!("transcribe.gpu = {use_gpu} already uses the {best}; nothing to change.");
+    if gpu::use_gpu(config.transcribe.gpu, Some(&device)) == use_gpu {
+        match config.transcribe.gpu {
+            Some(_) => {
+                println!("transcribe.gpu = {use_gpu} already uses the {best}; nothing to change.")
+            }
+            None => println!(
+                "With transcribe.gpu unset, kute already uses the {best} here; nothing to change."
+            ),
+        }
         return Ok(());
     }
 
@@ -135,22 +143,6 @@ fn gpu_backend() -> Option<&'static str> {
     } else {
         None
     }
-}
-
-/// The device whisper.cpp uses for the GPU (the first one), when the backend can name it.
-#[cfg(feature = "vulkan")]
-fn gpu_device() -> Option<String> {
-    whisper_rs::vulkan::list_devices()
-        .into_iter()
-        .next()
-        .map(|d| d.name)
-}
-
-#[cfg(not(feature = "vulkan"))]
-fn gpu_device() -> Option<String> {
-    Path::new("/dev/nvidiactl")
-        .exists()
-        .then(|| "NVIDIA".to_string())
 }
 
 /// A benchmark during a call or a transcription would slow both and time neither fairly.
@@ -323,23 +315,23 @@ mod tests {
     #[test]
     fn set_gpu_adds_the_key_and_the_table() {
         let out = set_gpu("[transcribe]\nmodel = \"small\"\n", false).unwrap();
-        assert!(!Config::parse(&out).unwrap().transcribe.gpu);
+        assert_eq!(Config::parse(&out).unwrap().transcribe.gpu, Some(false));
         assert_eq!(Config::parse(&out).unwrap().transcribe.model, "small");
 
         let out = set_gpu("[user]\nname = \"Alex\"\n", false).unwrap();
         let config = Config::parse(&out).unwrap();
-        assert!(!config.transcribe.gpu);
+        assert_eq!(config.transcribe.gpu, Some(false));
         assert_eq!(config.user.name, "Alex");
 
         let out = set_gpu("", true).unwrap();
-        assert!(Config::parse(&out).unwrap().transcribe.gpu);
+        assert_eq!(Config::parse(&out).unwrap().transcribe.gpu, Some(true));
     }
 
     #[test]
     fn set_gpu_works_on_an_inline_table() {
         let out = set_gpu("transcribe = { model = \"small\" }\n", false).unwrap();
         let config = Config::parse(&out).unwrap();
-        assert!(!config.transcribe.gpu);
+        assert_eq!(config.transcribe.gpu, Some(false));
         assert_eq!(config.transcribe.model, "small");
     }
 
@@ -349,7 +341,7 @@ mod tests {
         let path = dir.path().join("kute").join("config.toml");
         write_gpu_setting(&path, false).unwrap();
         let config = Config::load(Some(&path)).unwrap();
-        assert!(!config.transcribe.gpu);
+        assert_eq!(config.transcribe.gpu, Some(false));
     }
 
     #[test]

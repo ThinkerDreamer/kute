@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod detect;
 pub mod dialog;
 pub mod doctor;
+pub mod gpu;
 pub mod import;
 pub mod index;
 pub mod ipc;

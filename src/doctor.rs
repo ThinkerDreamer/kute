@@ -4,6 +4,7 @@
 //! programs on both the shell's `PATH` and the `PATH` the installed service runs with.
 
 use crate::config::{Config, SummaryBackend, TranscribeBackend, expand_tilde};
+use crate::gpu;
 use crate::ipc::{self, Request, Response};
 use crate::models;
 use crate::program::{find, is_executable};
@@ -351,18 +352,24 @@ fn gpu(config: &Config) -> Check {
             "built without GPU support; transcription runs on the CPU (slow for large models)",
         );
     };
-    if !config.transcribe.gpu {
+    if config.transcribe.gpu == Some(false) {
         return Check::warn(
             "GPU",
             format!("built with {backend}, but transcribe.gpu = false: transcription uses the CPU"),
         );
+    }
+    let device = gpu::device();
+    if let Some(note) = gpu::integrated_note(config.transcribe.gpu, device.as_ref()) {
+        return Check::ok("GPU", format!("{backend}, but {note}"));
     }
     let found = if cfg!(feature = "cuda") {
         Path::new("/dev/nvidiactl").exists()
     } else {
         !vulkan_drivers().is_empty()
     };
-    if found {
+    if let Some(device) = device {
+        Check::ok("GPU", format!("{backend} on {}", device.name))
+    } else if found {
         Check::ok(
             "GPU",
             format!("{backend}; whisper.cpp falls back to the CPU if the GPU can't be used"),

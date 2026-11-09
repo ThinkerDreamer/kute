@@ -72,7 +72,8 @@ pub struct TranscribeConfig {
     /// `auto`, a Whisper language code such as `it` to force it, or several such as `ru,en`
     /// to detect among them. A session's own languages (`kute language`) win.
     pub language: String,
-    pub gpu: bool,
+    /// Transcribe on the GPU. Unset: only on a discrete GPU (see `gpu::use_gpu`).
+    pub gpu: Option<bool>,
 }
 
 impl Default for TranscribeConfig {
@@ -82,7 +83,7 @@ impl Default for TranscribeConfig {
             command: Vec::new(),
             model: "large-v3-turbo".into(),
             language: "auto".into(),
-            gpu: true,
+            gpu: None,
         }
     }
 }
@@ -284,7 +285,7 @@ mod tests {
         assert_eq!(c.labels.others, "Others");
         assert_eq!(c.transcribe.model, "large-v3-turbo");
         assert_eq!(c.transcribe.language, "auto");
-        assert!(c.transcribe.gpu);
+        assert_eq!(c.transcribe.gpu, None);
         assert_eq!(c.summary.backend, SummaryBackend::None);
         assert_eq!(c.summary.language, "auto");
         assert_eq!(c.summary.min_words, 80);
@@ -319,7 +320,7 @@ mod tests {
         assert_eq!(c.user.name, "Alex");
         assert_eq!(c.labels.others, "Team");
         assert_eq!(c.transcribe.model, "small");
-        assert!(!c.transcribe.gpu);
+        assert_eq!(c.transcribe.gpu, Some(false));
         assert_eq!(c.summary.backend, SummaryBackend::Command);
         assert_eq!(c.summary.command, vec!["claude", "-p"]);
         assert_eq!(c.summary.timeout, jiff::SignedDuration::from_secs(120));

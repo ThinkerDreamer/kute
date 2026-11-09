@@ -179,3 +179,5 @@ that.
   whisper.cpp fell back to the CPU for the GPU pass (see "whisper.cpp logs are swallowed").
 - [ ] **CPU transcription uses at most 8 threads.** `WhisperTranscriber::load` caps the thread
   count, so `kute doctor --bench` may undersell a 12- or 16-core CPU. Try more threads there.
+  This matters more now that machines with only an integrated GPU transcribe on the CPU by
+  default.

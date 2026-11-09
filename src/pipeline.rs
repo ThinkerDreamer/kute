@@ -3,6 +3,7 @@
 
 use crate::audio;
 use crate::config::{Config, Labels, TranscribeBackend};
+use crate::gpu;
 use crate::index::Index;
 use crate::models;
 use crate::render;
@@ -38,11 +39,15 @@ impl WhisperProvider {
         let (model_path, model_name) =
             models::resolve_whisper(&store.models_dir(), &config.transcribe.model)?;
         let vad_path = models::resolve_vad(&store.models_dir())?;
+        let device = gpu::device();
+        if let Some(note) = gpu::integrated_note(config.transcribe.gpu, device.as_ref()) {
+            eprintln!("kute: {note}");
+        }
         Ok(WhisperProvider {
             model_path,
             model_name,
             vad_path,
-            gpu: config.transcribe.gpu,
+            gpu: gpu::use_gpu(config.transcribe.gpu, device.as_ref()),
             loaded: None,
         })
     }

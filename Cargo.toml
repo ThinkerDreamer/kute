@@ -31,7 +31,7 @@ toml = "1"
 toml_edit = "0.25"
 ureq = { version = "3", features = ["json"] }
 wait-timeout = "0.2"
-whisper-rs = "0.16"
+whisper-rs = { version = "0.16", features = ["raw-api"] }
 
 [dev-dependencies]
 mockito = "1"
