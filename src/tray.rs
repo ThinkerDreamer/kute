@@ -241,13 +241,32 @@ fn own_icons() -> Option<std::path::PathBuf> {
         .inspect_err(|e| eprintln!("kute: using the theme's tray icons: {e:#}"))
         .ok()?;
     let hicolor = hicolor_icons(&data);
-    if let Err(e) = write_icons(&hicolor) {
+    if let Err(e) = write_icons(&hicolor).and_then(|()| outdate_icon_cache(&data)) {
         eprintln!(
             "kute: can't add the tray icons to {}: {e:#}",
             hicolor.display()
         );
     }
     Some(dir)
+}
+
+/// Marks the user's hicolor icon cache, if there is one, as older than its folder.
+///
+/// GTK trusts `icon-theme.cache` while it is newer than the theme's folder, and finds only
+/// the icons the cache lists. Writing into `scalable/apps` leaves the theme folder's time as
+/// it was, so a cache made before kute's icons hides them. Touching the folder makes GTK
+/// read the files instead, and tells a running GTK to look again. The cache itself is left
+/// alone: it is not kute's.
+fn outdate_icon_cache(data: &std::path::Path) -> Result<()> {
+    let theme = data.join("icons/hicolor");
+    let Ok(cache) = std::fs::metadata(theme.join("icon-theme.cache")) else {
+        return Ok(());
+    };
+    if cache.modified()? < std::fs::metadata(&theme)?.modified()? {
+        return Ok(());
+    }
+    std::fs::File::open(&theme)?.set_modified(std::time::SystemTime::now())?;
+    Ok(())
 }
 
 /// Until the daemon's first status arrives.
@@ -668,6 +687,31 @@ mod tests {
         assert!(matches!(tray.status(), ksni::Status::Passive));
         tray.passive_when_idle = false;
         assert!(matches!(tray.status(), ksni::Status::Active));
+    }
+
+    #[test]
+    fn a_stale_icon_cache_is_marked_outdated() {
+        use std::time::{Duration, SystemTime};
+        let set = |p: &std::path::Path, t: SystemTime| {
+            std::fs::File::open(p).unwrap().set_modified(t).unwrap()
+        };
+        let modified = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        // No theme folder, or no cache in it: nothing to do.
+        outdate_icon_cache(data.path()).unwrap();
+        let theme = data.path().join("icons/hicolor");
+        write_icons(&hicolor_icons(data.path())).unwrap();
+        outdate_icon_cache(data.path()).unwrap();
+
+        // A cache newer than the folder, as after writing into scalable/apps.
+        let cache = theme.join("icon-theme.cache");
+        std::fs::write(&cache, b"").unwrap();
+        let now = SystemTime::now();
+        set(&cache, now - Duration::from_secs(60));
+        set(&theme, now - Duration::from_secs(120));
+        outdate_icon_cache(data.path()).unwrap();
+        assert!(modified(&theme) > modified(&cache));
+        assert!(cache.exists(), "the cache is not kute's to remove");
     }
 
     #[test]
