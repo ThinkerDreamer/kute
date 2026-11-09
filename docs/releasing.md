@@ -44,17 +44,23 @@ before merging, fold review fixups into the commit they fix (`git commit --fixup
    `main` like any other. The release commit itself is left out of the changelog. If `main`
    moves before it merges, rebase the branch and run step 3's `git cliff` again.
 
-5. Tag the release commit, which is now the tip of `main`, and push the tag:
+5. Tag the release commit, which is now the tip of `main`, and push `main` and the tag to both
+   repositories: `origin` is the development repository, where pull requests and branches
+   live, and `public` is the public mirror, which carries only `main` and the release tags.
 
    ```bash
    git switch main && git pull
    git tag -a v0.3.0 -m "kute 0.3.0"
    git push origin v0.3.0
+   git push public main v0.3.0
    ```
 
-   The tag starts `.github/workflows/release.yml`, which checks that the tag matches
-   `Cargo.toml` and that `CHANGELOG.md` has the section, builds the portable Ubuntu 24.04
-   tarball, and publishes a GitHub release with that section as its notes.
+   Add the mirror once with `git remote add public https://github.com/ThinkerDreamer/kute`.
+   Never push other branches to it.
+
+   On each repository, the tag starts `.github/workflows/release.yml`, which checks that the
+   tag matches `Cargo.toml` and that `CHANGELOG.md` has the section, builds the portable
+   Ubuntu 24.04 tarball, and publishes a GitHub release with that section as its notes.
 
 6. Publish the crate to crates.io from the tagged commit, with a token from
    <https://crates.io/settings/tokens> (`cargo login` stores it once):
