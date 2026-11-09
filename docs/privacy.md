@@ -14,7 +14,10 @@ With the default config, nothing but the model downloads:
 
 - **`kute model download`** fetches the Whisper and Silero VAD models from Hugging Face
   (`huggingface.co`). That's a plain file download; no audio or text is sent.
-- **Transcription** runs locally with whisper.cpp. Audio is never uploaded.
+- **Transcription** runs locally with whisper.cpp. Audio is never uploaded. With
+  `transcribe.backend = "command"`, the speech chunks go to the helper program you configured;
+  the [Qwen3-ASR helper](../contrib/qwen3-asr/README.md) runs locally too, but downloads its
+  models from Hugging Face the first time.
 - **Summaries** are off by default. When you turn them on, the transcript of each conversation
   (text, not audio) goes to the backend you chose:
   - `command`: whatever that program does with it. A local model (e.g. `ollama run`) keeps it on
@@ -46,6 +49,9 @@ index.sqlite         the search index, rebuilt from the session folders
 models/              downloaded models
 ```
 
+The tray icons are written to `~/.local/share/kute/icons` and
+`~/.local/share/icons/hicolor/scalable/apps`; they hold nothing about your calls.
+
 While a call is being recorded and processed, the audio is kept as WAV and compressed to the
 `opus` format afterwards.
 
@@ -57,7 +63,8 @@ While a call is being recorded and processed, the audio is kept as WAV and compr
 
 ## Keeping kute out of a call
 
-- `kute pause` stops it from starting new recordings until `kute resume`.
+- `kute pause` (or unticking *Detect calls* in the tray) stops it from starting new recordings
+  until `kute resume`, and ends a recording it started on its own.
 - `ignore_apps` in the [config](configuration.md#detect) excludes an app for good, and
   `allow_apps` limits recording to the apps you list.
 - Mute at the system level (e.g. your desktop's microphone icon), not only in the call app.

@@ -27,8 +27,10 @@ import recordings made elsewhere. See
   coworking call becomes one session, split into conversations wherever nobody spoke for
   5 minutes, and each is transcribed and summarized as soon as it ends.
 - **Local transcription** with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) on your GPU
-  (Vulkan by default, CUDA optional). Audio never leaves your machine unless you configure a
-  remote summarizer.
+  (Vulkan by default, CUDA optional). When the only GPU is integrated, kute uses the CPU, which
+  is often faster there; `kute doctor --bench` measures both. Audio stays on your machine; a
+  remote summarizer, if you configure one, gets only the transcript. Other speech recognizers
+  plug in as a helper program (see [Configuration](docs/configuration.md#the-command-backend)).
 - **Silence is skipped before Whisper sees it.** Silero VAD finds the speech, and only those
   chunks are transcribed. That avoids Whisper's hallucinations on silence and keeps hours-long
   recordings fast.
@@ -66,7 +68,9 @@ kute model download        # large-v3-turbo (1.6 GB) and the Silero VAD model
 kute doctor                # checks PipeWire, ffmpeg, the GPU backend, models and the summarizer
 ```
 
-Nix users: a flake is on its way. See [Installing](docs/install.md) for details.
+A prebuilt binary for Ubuntu 24.04 and systems based on it (such as Linux Mint 22) is attached
+to each [release](https://github.com/ThinkerDreamer/kute/releases), and Nix users can build
+the flake in this repository. See [Installing](docs/install.md) for both.
 
 `kute model list` shows the other Whisper models; `kute model download small` fetches one.
 Downloads are checked against known SHA-256 sums.
@@ -92,17 +96,18 @@ unit you wrote by hand.
 Then just take calls. While one is recorded, a notification "Recording: <app>" offers Stop and
 Discard, and the mic in the tray icon (an ear and a mic) turns red. When a summary is ready, a
 notification shows its first line; click it to open `summary.md`. The tray icon's menu records,
-stops, turns call detection off and on, and opens the recordings folder. While a call is recorded, it also asks for
-the call's title, who else is on it, its languages and notes for the summary, in a small dialog
-(kdialog, or zenity where there is no kdialog). From a terminal:
+stops (keeping or deleting the recording), turns call detection off and on, and opens the
+recordings folder. While a call is recorded, the menu also sets the call's title, who else is on
+it, its languages and notes for the summary, each in a small dialog (kdialog, or zenity where
+there is no kdialog). From a terminal:
 
 ```bash
 kute status                 # idle, recording, ...; the current session; the queue
-kute status --json          # the same for scripts; "recording": true while a call is recorded
+kute status --json          # the same for scripts; "recording": true while kute captures audio
 kute record "Standup"       # record now, until `kute stop` or the call ends
 kute stop                   # end the current session now
 kute discard                # end it and delete it
-kute pause / kute resume    # stop listening for calls / start again
+kute pause / kute resume    # stop detecting calls (ends a detected recording) / start again
 ```
 
 **Mute at the system level** (e.g. the Plasma microphone icon), not only in the call app.
@@ -168,8 +173,9 @@ and an aside in another language comes out as Russian. `retranscribe` and `impor
 `--me-lang` and `--others-lang`. To use the same languages for every call, set
 `transcribe.language` in the config.
 
-Other commands: `title`, `open`, `summarize` (again, optionally `--lang it`), `retranscribe`
-(e.g. with `--model`), `process` (finish anything that failed), `reindex`. See `kute --help`.
+Other commands: `title`, `open`, `summarize` (again, optionally `--lang it`, `--backend` or
+`--conversation 2`), `retranscribe` (e.g. with `--model`), `process` (finish anything that
+failed), `reindex`, `list --since 7d`, and `debug` for bug reports. See `kute --help`.
 While the daemon runs, these are queued on it and the result shows up in its log (and as a
 notification when a summary is written).
 

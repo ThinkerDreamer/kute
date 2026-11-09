@@ -43,7 +43,7 @@ How the daemon decides that a call started and ended. See [How it works](../READ
 | `ignore_apps` | `[]` | Apps that never start a recording. |
 | `allow_apps` | unset | When set, only these apps start a recording. |
 | `ignore_recorders` | `true` | Screen and sound recorders (OBS, Audacity, SimpleScreenRecorder, Kooha, GPU Screen Recorder, vokoscreenNG) never start a recording or keep one going, so a call you also record in OBS ends when the call does. `false` treats them like any other app. An app listed in `allow_apps` always counts. |
-| `end_manual` | `true` | A manual recording (`kute record`, or Record in the tray) that a call joins, or that starts during a call, ends with that call like an automatic one. A call counts once its app has had the microphone open for `min_duration`, so a mic check doesn't end it. `false` records until `kute stop`. |
+| `end_manual` | `true` | A manual recording (`kute record`, or *Record now* in the tray) that a call joins, or that starts during a call, ends with that call like an automatic one. A call counts once its app has had the microphone open for `min_duration`, so a mic check doesn't end it. `false` records until `kute stop`. |
 
 An entry in `ignore_apps` or `allow_apps` matches an app's name (as shown by `kute status` and in
 the transcript header) or its binary, ignoring case: `["Firefox"]` or `["firefox"]`.
@@ -61,10 +61,10 @@ kute always records the default output's monitor as the "Others" track.
 | Key | Default | |
 |---|---|---|
 | `backend` | `"whisper"` | `whisper` (built in) or `command`: a helper program such as the [Qwen3-ASR helper](../contrib/qwen3-asr/README.md). |
-| `command` | | `command` backend: the program and its arguments. |
+| `command` | | `command` backend: the program and its arguments. A leading `~` in any of them is expanded. |
 | `model` | `"large-v3-turbo"` | `whisper` backend: a name from `kute model list`, or a path to a ggml `.bin` file. |
 | `language` | `"auto"` | `"auto"` detects the language of each speech chunk, so mixed-language calls work. Set a code such as `"it"` to force one, or several such as `"ru,en"` to detect only among those. A session's own setting (`kute language`, for both tracks or one) wins. |
-| `gpu` | unset | Unset, kute transcribes on a discrete GPU and on the CPU when the only GPU is integrated, which is often slower than a desktop CPU. `true` or `false` forces the GPU or the CPU. `kute doctor --bench` measures which is faster and can set it. |
+| `gpu` | unset | `whisper` backend: unset, kute transcribes on a discrete GPU and on the CPU when the only GPU is integrated, which is often slower than a desktop CPU. `true` or `false` forces the GPU or the CPU. `kute doctor --bench` measures which is faster and can set it. |
 
 Every backend uses kute's own speech detection (Silero VAD) to cut the audio into chunks, so
 the VAD model is needed either way.
@@ -85,8 +85,8 @@ command = ["~/kute-qwen/.venv/bin/python", "~/kute-qwen/kute-qwen3-asr.py"]
 
 `language` and `kute language` work as with Whisper. A helper that can't limit detection to a
 list, as Qwen3-ASR can't, chooses among the candidates itself (see its README).
-`kute retranscribe --model`
-only applies to Whisper.
+`kute retranscribe --model`, `gpu` and `kute doctor --bench` only apply to Whisper; the helper
+picks its own device.
 
 ## `[summary]`
 
@@ -180,13 +180,13 @@ low_priority = true
 
 | Key | Default | |
 |---|---|---|
-| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure notification. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
+| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure or "Recording stopped" notification. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
 
 ## `[tray]`
 
 | Key | Default | |
 |---|---|---|
-| `enabled` | `true` | Show the tray icon. Its menu records, stops, turns call detection off and on, and opens the recordings folder. While a call is recorded, it asks for the call's title, who else is on it, its languages and notes in a dialog, which needs `kdialog` or `zenity`. It needs a StatusNotifierItem host: KDE Plasma, most other panels, or the AppIndicator extension on GNOME. |
+| `enabled` | `true` | Show the tray icon. Its menu records (*Record now*), stops (*Stop and keep*, *Stop and delete*), turns call detection off and on, and opens the recordings folder. While a call is recorded, it also sets the call's title, who else is on it, its languages and notes, each in a dialog, which needs `kdialog` or `zenity`. It needs a StatusNotifierItem host: KDE Plasma, most other panels, or the AppIndicator extension on GNOME. |
 
 ## A complete example
 

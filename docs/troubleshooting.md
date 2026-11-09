@@ -17,8 +17,8 @@ one the daemon uses.
 
 - **Is the daemon running?** `kute status` says so. If you started it in a terminal, it stops
   when the terminal closes; see [running it at login](install.md#running-the-daemon-at-login).
-- **Is it paused?** `kute status` shows `paused: yes` after `kute pause`; `kute resume` turns
-  detection back on.
+- **Is it paused?** `kute status` shows `paused: yes` after `kute pause` (or *Detect calls*
+  unticked in the tray); `kute resume` turns detection back on.
 - **Was the call shorter than `min_duration`** (20 s by default)? Shorter mic use counts as a
   mic check and is dropped.
 - **Is the app in `ignore_apps`, or missing from `allow_apps`?** Check the
@@ -113,6 +113,9 @@ The log (`journalctl --user -u kute`) says why after each click, e.g. `xdg-open 
   Tray*, and set kute to *Always shown* if you want it in view.
 - **GNOME has no tray of its own.** Install the AppIndicator and KStatusNotifierItem Support
   extension. `kute doctor` says whether a tray host is running.
+- **Cinnamon shows the icon through the XApp Status applet** (and its `xapp-sn-watcher`
+  service), which Linux Mint has in the panel by default. If there's no icon, right-click the
+  panel, choose *Applets*, and add *XApp Status Applet*.
 - **A blank or generic icon?** kute writes its icons to `~/.local/share/kute/icons` when the
   daemon starts and tells the tray host to look there. It also adds them to
   `~/.local/share/icons/hicolor/scalable/apps`, where hosts that ignore kute's folder (Cinnamon

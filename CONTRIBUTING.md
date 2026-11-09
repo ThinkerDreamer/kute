@@ -22,7 +22,7 @@ CI runs these, so run them before you push:
 cargo fmt --check
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test --no-default-features
-cargo deny check   # cargo install cargo-deny
+cargo deny --all-features check   # cargo install cargo-deny
 ```
 
 `cargo deny` checks dependencies against the RustSec advisories, the allowed licenses and

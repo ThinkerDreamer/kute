@@ -30,9 +30,9 @@ Found by comparing kute's transcript of a short English/Italian test call with t
   it to Whisper through `FullParams::set_initial_prompt` for every chunk in
   `WhisperTranscriber::transcribe`. Remote backends (Deepgram, ElevenLabs) have the same idea as
   "keyterms", so keep the setting provider-agnostic.
-- [ ] **Speaker names per session.** Labels are global (`[labels]`), so a 1:1 call can't show real
-  names. Add `kute import ... --me Alex --others Jordan` (and a way to set them later, like
-  `kute title`), store them in `meta.toml`, and fall back to `[labels]` when unset.
+- [ ] **Speaker names per session.** The others' label is per session now (`kute others`, the
+  tray), but "Me" still comes from `[labels]`, and `kute import` can't set either. Add
+  `kute import ... --me Alex --others Jordan` and a per-session "Me" label.
 - [ ] **Record the language chosen for each chunk, and revisit how short chunks borrow one.** A
   short Italian "Sì" came out as English "See": chunks under 3 s take the language of the nearest
   long chunk, which can be on the other side of a language switch. Store the per-chunk language
@@ -121,8 +121,9 @@ Found in the final review of plan 3 and deferred.
 
 ## Packaging
 
-Nix comes first: a `flake.nix` in this repo, then the same derivation upstreamed to nixpkgs
-(`pkgs/by-name/ku/kute/package.nix`). Whatever package ships kute must build with
+The repo has a `flake.nix` (`nix/package.nix`); next is upstreaming the same derivation to
+nixpkgs (`pkgs/by-name/ku/kute/package.nix`). kute is on crates.io, and each release has a
+prebuilt Ubuntu 24.04 tarball. Whatever package ships kute must build with
 `GGML_NATIVE=OFF` (see the AUR notes below).
 
 ### AUR (on hold)

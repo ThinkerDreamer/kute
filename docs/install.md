@@ -10,6 +10,9 @@ download once with `kute model download` before the first transcription (see [Mo
 - `ffmpeg` and `ffprobe`, for decoding imports and compressing audio to the `opus` format.
 - A desktop session: the daemon talks to the CLI over a socket in `$XDG_RUNTIME_DIR`, and sends
   desktop notifications.
+- Optional: `xdg-open` (usually in `xdg-utils`) to open summaries and folders from
+  notifications, and `kdialog` or `zenity` for the tray's dialogs (title, names, languages,
+  notes).
 - To build: Rust 1.89 or newer, a C/C++ toolchain, `cmake` and `clang` (whisper.cpp is compiled
   from source and bound with bindgen).
 - For GPU transcription, one of:
@@ -19,7 +22,29 @@ download once with `kute model download` before the first transcription (see [Mo
   - **CUDA**: the CUDA toolkit, and build with `--no-default-features --features cuda`.
 
   Without a GPU backend it runs on the CPU. That works, but a long call takes a while; pick a
-  smaller model (see [Models](#models)).
+  smaller model (see [Models](#models)). A GPU build also uses the CPU by default when the only
+  GPU is integrated, since a desktop CPU is often faster than it; `kute doctor --bench` measures
+  both, and `transcribe.gpu` in the [config](configuration.md#transcribe) overrides it.
+
+## Prebuilt binary
+
+Each [release](https://github.com/ThinkerDreamer/kute/releases) has a tarball,
+`kute-<version>-x86_64-ubuntu24.04.tar.gz`, built on Ubuntu 24.04 with Vulkan and for any x86-64
+CPU with AVX2. It runs on Ubuntu 24.04 and newer and on systems based on them, such as Linux
+Mint 22, but not on older ones (their glibc is too old). Install the runtime packages, then the
+binary:
+
+```bash
+sudo apt install pipewire-bin ffmpeg libvulkan1 mesa-vulkan-drivers xdg-utils zenity
+tar xzf kute-<version>-x86_64-ubuntu24.04.tar.gz
+cd kute-<version>-x86_64-ubuntu24.04
+sha256sum -c SHA256SUMS
+install -D -m 755 kute ~/.local/bin/kute
+```
+
+`libvulkan1` is needed for the binary to start at all, even when it transcribes on the CPU. If
+`kute` isn't found afterwards, log out and back in: some distributions add `~/.local/bin` to
+`PATH` only when it exists at login.
 
 ## From crates.io
 
@@ -46,8 +71,19 @@ CPU.
 
 ## With Nix
 
-*Coming soon.* A `flake.nix` is in progress; this section will cover `nix run`, `nix profile
-install` and a NixOS/Home Manager snippet once it lands.
+The repository is a flake with two packages: `kute` (the default, with Vulkan) and `kute-cpu`.
+Both build with `GGML_NATIVE=OFF` and find `ffmpeg` and the PipeWire tools on their own.
+
+```bash
+nix run github:ThinkerDreamer/kute -- doctor
+nix profile install github:ThinkerDreamer/kute             # or ...#kute-cpu
+```
+
+Then download the models and install the service as below; the unit runs
+`~/.nix-profile/bin/kute`, so it keeps working after `nix profile upgrade`. In a NixOS or Home
+Manager config that has this flake as an input named `kute`, add
+`inputs.kute.packages.${pkgs.system}.default` to `environment.systemPackages` or
+`home.packages` instead. `kute doctor` says whether the build found your GPU.
 
 ## Models
 
@@ -113,9 +149,10 @@ the index from the session folders on its own.
 
 ```bash
 kute service uninstall     # stops and disables the service, removes the unit kute wrote
-cargo uninstall kute
+cargo uninstall kute       # or delete ~/.local/bin/kute, or nix profile remove kute
 ```
 
 Your recordings, transcripts and models stay in `~/.local/share/kute` (or
 `$XDG_DATA_HOME/kute`, or your `storage.dir`)
-and the config in `~/.config/kute`. Delete those folders to remove everything.
+and the config in `~/.config/kute`. Delete those folders to remove everything. The tray icons
+kute added to `~/.local/share/icons/hicolor/scalable/apps` (`kute-*-symbolic.svg`) can go too.
