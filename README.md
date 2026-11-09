@@ -29,7 +29,8 @@ import recordings made elsewhere. See
 - **Local transcription** with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) on your GPU
   (Vulkan by default, CUDA optional). When the only GPU is integrated, kute uses the CPU, which
   is often faster there; `kute doctor --bench` measures both. Audio stays on your machine; a
-  remote summarizer, if you configure one, gets only the transcript. Other speech recognizers
+  remote summarizer, if you configure one, gets the transcript text and the call's details
+  ([Privacy](docs/privacy.md) lists them). Other speech recognizers
   plug in as a helper program (see [Configuration](docs/configuration.md#the-command-backend)).
 - **Silence is skipped before Whisper sees it.** Silero VAD finds the speech, and only those
   chunks are transcribed. That avoids Whisper's hallucinations on silence and keeps hours-long
