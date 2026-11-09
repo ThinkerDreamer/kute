@@ -108,7 +108,12 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok());
     let service_path = unit.as_deref().and_then(unit_path_value);
-    checks.extend(programs(&shell_path, service_path.as_deref()));
+    let opener = config
+        .notify
+        .open
+        .first()
+        .map_or("xdg-open", String::as_str);
+    checks.extend(programs(&shell_path, service_path.as_deref(), opener));
     flush(&mut checks);
     checks.push(pipewire(&config));
     flush(&mut checks);
@@ -239,11 +244,20 @@ const PROGRAMS: &[(&str, &str, Level)] = &[
 ];
 
 /// Each program on the shell's `PATH` and, when the service is installed, on its `PATH`:
-/// the daemon runs with the second.
-pub fn programs(shell_path: &OsStr, service_path: Option<&str>) -> Vec<Check> {
+/// the daemon runs with the second. `opener` is `notify.open`'s program, checked in place of
+/// `xdg-open`.
+pub fn programs(shell_path: &OsStr, service_path: Option<&str>, opener: &str) -> Vec<Check> {
     PROGRAMS
         .iter()
         .map(|&(name, purpose, missing)| {
+            let name = if name == "xdg-open" { opener } else { name };
+            if Path::new(name).components().count() > 1 {
+                return if command_found(name, shell_path, service_path) {
+                    Check::ok(name, format!("notify.open ({purpose})"))
+                } else {
+                    Check::new(missing, name, "notify.open is not found or not executable")
+                };
+            }
             let in_shell = find(name, shell_path);
             let in_service = service_path.map(|p| find(name, OsStr::new(p)));
             match (in_shell, in_service) {
@@ -690,7 +704,7 @@ mod tests {
         }
         executable(service.path(), "pw-dump");
         let service_path = service.path().display().to_string();
-        let checks = programs(shell.path().as_os_str(), Some(&service_path));
+        let checks = programs(shell.path().as_os_str(), Some(&service_path), "xdg-open");
         assert_eq!(level_of(&checks, "pw-dump"), Level::Ok);
         assert_eq!(level_of(&checks, "pw-record"), Level::Fail);
         assert_eq!(level_of(&checks, "xdg-open"), Level::Warn);
@@ -702,10 +716,22 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_opener_is_checked_instead_of_xdg_open() {
+        let shell = tempfile::tempdir().unwrap();
+        executable(shell.path(), "kate");
+        let checks = programs(shell.path().as_os_str(), None, "kate");
+        assert_eq!(level_of(&checks, "kate"), Level::Ok);
+        assert!(!checks.iter().any(|c| c.what == "xdg-open"));
+        let opener = shell.path().join("kate").display().to_string();
+        let checks = programs(OsStr::new(""), None, &opener);
+        assert_eq!(level_of(&checks, &opener), Level::Ok);
+    }
+
+    #[test]
     fn a_file_that_cannot_be_run_is_not_found() {
         let shell = tempfile::tempdir().unwrap();
         std::fs::write(shell.path().join("ffmpeg"), "").unwrap();
-        let checks = programs(shell.path().as_os_str(), None);
+        let checks = programs(shell.path().as_os_str(), None, "xdg-open");
         assert_eq!(level_of(&checks, "ffmpeg"), Level::Fail);
     }
 
@@ -733,7 +759,7 @@ mod tests {
     fn programs_without_a_service_only_need_the_shell() {
         let shell = tempfile::tempdir().unwrap();
         executable(shell.path(), "ffmpeg");
-        let checks = programs(shell.path().as_os_str(), None);
+        let checks = programs(shell.path().as_os_str(), None, "xdg-open");
         assert_eq!(level_of(&checks, "ffmpeg"), Level::Ok);
         assert_eq!(level_of(&checks, "ffprobe"), Level::Fail);
     }
