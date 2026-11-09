@@ -5,6 +5,27 @@ All notable changes to kute are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
 breaking change bumps the minor version and a fix bumps the patch version.
 
+## [0.3.0] - 2026-11-09
+
+### Added
+
+- **detect:** End a manual session with the call it follows
+
+### Fixed
+
+- **deps:** Bump rustls, rustls-webpki and webpki-roots for advisories
+- **detect:** Restart the follow count when another app's mic takes over
+- **cli:** End quietly when stdout is a closed pipe
+- **cli:** Run jobs here when --config is not the daemon's config
+- **cli:** Ask the daemon which config it runs with
+- **cli:** Queue on the daemon only when its archive matches too
+- **cli:** Fall back to an old daemon only when it can't parse Identity
+- **daemon:** Report the archive as an absolute path
+
+### Packaging
+
+- Strip and LTO the release binary
+
 ## [0.2.0] - 2026-11-08
 
 ### Added
@@ -93,6 +114,7 @@ breaking change bumps the minor version and a fix bumps the patch version.
 
 - Install, configuration, privacy, troubleshooting and contributing guides ([#1](https://github.com/ThinkerDreamer/kute/pull/1))
 
+[0.3.0]: https://github.com/ThinkerDreamer/kute/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThinkerDreamer/kute/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ThinkerDreamer/kute/releases/tag/v0.1.0
 
