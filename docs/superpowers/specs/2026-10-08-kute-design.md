@@ -208,7 +208,10 @@ later per-speaker labels on the others side (`Others (A)`).
 - **Ignored stream:** belongs to kute's own PID; or is a peak-meter / level-monitoring
   stream, marked by `stream.monitor = true` (the Plasma volume applet's
   `PlasmaPA-VolumeMeter` streams, confirmed in the spike; see section 12); or its app
-  matches `detect.ignore_apps`; or `detect.allow_apps` is set and the app is not in it.
+  matches `detect.ignore_apps`; or `detect.allow_apps` is set and the app is not in it; or
+  `detect.allow_apps` is unset, `detect.ignore_recorders` is on (the default) and the app is a
+  screen or sound recorder from the built-in list (`detect::RECORDERS`: OBS, Audacity, ...), which
+  holds the mic for its own sake and would otherwise keep a session alive after the call.
   An app matches a rule if its `application.process.binary` or its `application.name` does,
   case-insensitively. Labels (tray, `meta.toml`) use `application.name` when set, since
   Electron apps all report the binary `electron` (the Jitsi Meet app is
@@ -447,6 +450,7 @@ stop_grace = "15s"
 conversation_gap = "5m"
 ignore_apps = []
 # allow_apps = []
+ignore_recorders = true
 end_manual = true
 
 [capture]

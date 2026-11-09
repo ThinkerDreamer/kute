@@ -9,12 +9,16 @@ use std::path::Path;
 
 /// The actions without their times, and each `Start`'s app name.
 fn run(name: &str, until_ms: u64) -> Vec<(u64, String)> {
+    run_with(name, until_ms, &DetectConfig::default())
+}
+
+fn run_with(name: &str, until_ms: u64, config: &DetectConfig) -> Vec<(u64, String)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/traces")
         .join(name);
     let entries = trace::read_file(&path).unwrap();
     let snapshots = trace::snapshots(&entries);
-    let mut detector = Detector::new(&DetectConfig::default(), 1);
+    let mut detector = Detector::new(config, 1);
     replay(&mut detector, &snapshots, until_ms)
         .into_iter()
         .map(|(t, a)| {
@@ -51,4 +55,26 @@ fn a_mic_check_never_becomes_a_recording() {
         .map(|(_, l)| l)
         .collect();
     assert_eq!(labels, ["start Firefox", "discard"]);
+}
+
+#[test]
+fn a_call_ends_while_obs_keeps_recording_the_mic() {
+    // OBS has the mic open from 0 to 300 s; the Jitsi call runs from 5 s to 65 s.
+    let actions = run("synthetic-obs-holds-mic.jsonl", 360_000);
+    let labels: Vec<_> = actions.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels, ["start Jitsi Meet", "commit", "finish"]);
+    assert_eq!(actions[0].0, 5_000);
+    assert!((80_000..=80_500).contains(&actions[2].0), "{actions:?}");
+}
+
+#[test]
+fn with_recorders_counted_obs_holds_the_session_until_it_closes() {
+    let config = DetectConfig {
+        ignore_recorders: false,
+        ..DetectConfig::default()
+    };
+    let actions = run_with("synthetic-obs-holds-mic.jsonl", 360_000, &config);
+    let labels: Vec<_> = actions.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels, ["start OBS", "commit", "finish"]);
+    assert!((315_000..=315_500).contains(&actions[2].0), "{actions:?}");
 }

@@ -190,6 +190,7 @@ min_duration = "20s"              # how long the mic must stay open before recor
 stop_grace = "15s"                # how long after the call ends to keep recording
 conversation_gap = "5m"           # silence that splits a long session into conversations
 # ignore_apps = ["Firefox"]       # never treat these apps as calls (name or binary)
+# ignore_recorders = false        # let OBS and other recorders count as calls too
 
 [capture]
 # mic = "USB"                     # record this mic (substring of its name), not the default

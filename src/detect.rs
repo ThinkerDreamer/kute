@@ -12,6 +12,19 @@ use std::fmt;
 /// pre-join mic stream and opens a new one on joining.
 pub const MIC_GAP_MS: u64 = 2_000;
 
+/// Apps that record the microphone for their own sake, not for a call: screen and sound
+/// recorders. With `detect.ignore_recorders` on, their mic streams neither start a session
+/// nor keep one alive, so a call recorded in OBS still ends when the call does. Matched like
+/// `ignore_apps`, against the app's name or binary.
+pub const RECORDERS: &[&str] = &[
+    "obs",
+    "audacity",
+    "simplescreenrecorder",
+    "kooha",
+    "gpu-screen-recorder",
+    "vokoscreenng",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
@@ -57,6 +70,8 @@ pub struct Detector {
     ignore_apps: Vec<String>,
     /// Lowercased.
     allow_apps: Option<Vec<String>>,
+    /// Ignore the apps in `RECORDERS` that `allow_apps` doesn't name.
+    ignore_recorders: bool,
     own_pid: u32,
     end_manual: bool,
     phase: Phase,
@@ -104,6 +119,13 @@ fn app_matches(app: &App, rules: &[String]) -> bool {
         .any(|v| rules.contains(&v.to_lowercase()))
 }
 
+fn is_recorder(app: &App) -> bool {
+    [&app.name, &app.binary]
+        .into_iter()
+        .flatten()
+        .any(|v| RECORDERS.contains(&v.to_lowercase().as_str()))
+}
+
 impl Detector {
     pub fn new(config: &DetectConfig, own_pid: u32) -> Detector {
         Detector {
@@ -111,6 +133,7 @@ impl Detector {
             stop_grace_ms: ms(config.stop_grace),
             ignore_apps: lowercase(&config.ignore_apps),
             allow_apps: config.allow_apps.as_deref().map(lowercase),
+            ignore_recorders: config.ignore_recorders,
             own_pid,
             end_manual: config.end_manual,
             phase: Phase::Idle,
@@ -331,10 +354,10 @@ impl Detector {
                 .as_deref()
                 .is_some_and(|n| n.starts_with("kute-"))
             || app_matches(&s.app, &self.ignore_apps)
-            || self
-                .allow_apps
-                .as_deref()
-                .is_some_and(|allow| !app_matches(&s.app, allow))
+            || match self.allow_apps.as_deref() {
+                Some(allow) => !app_matches(&s.app, allow),
+                None => self.ignore_recorders && is_recorder(&s.app),
+            }
     }
 
     fn live_mics(&self) -> impl Iterator<Item = &Stream> {
@@ -733,6 +756,70 @@ mod tests {
         d.tick(132_000);
         assert_eq!(d.phase(), Phase::Grace);
         assert_eq!(d.tick(145_000), vec![Action::Finish]);
+    }
+
+    fn obs() -> App {
+        app("OBS", "obs")
+    }
+
+    #[test]
+    fn a_recorder_neither_starts_nor_holds_a_session() {
+        let mut d = Detector::new(&cfg(), 1);
+        assert!(d.streams(&[mic(70, obs())], 0).is_empty());
+        assert!(d.tick(60_000).is_empty());
+        assert_eq!(d.phase(), Phase::Idle);
+
+        // A call while OBS records starts a session for the call app, and ends with it.
+        assert!(matches!(
+            d.streams(&[mic(70, obs()), mic(88, jitsi())], 61_000)[..],
+            [Action::Start { .. }]
+        ));
+        assert_eq!(d.trigger(), Some(&jitsi()));
+        assert_eq!(d.tick(81_000), vec![Action::Commit]);
+        d.streams(&[mic(70, obs())], 100_000);
+        d.tick(102_000);
+        assert_eq!(d.phase(), Phase::Grace);
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
+    }
+
+    #[test]
+    fn recorders_count_when_configured() {
+        // `ignore_recorders = false`: OBS is an app like any other.
+        let off = DetectConfig {
+            ignore_recorders: false,
+            ..cfg()
+        };
+        let mut d = Detector::new(&off, 1);
+        assert!(matches!(
+            d.streams(&[mic(70, obs())], 0)[..],
+            [Action::Start { .. }]
+        ));
+
+        // An `allow_apps` that names one lets it through too.
+        let allow = DetectConfig {
+            allow_apps: Some(vec!["OBS".into()]),
+            ..cfg()
+        };
+        let mut d = Detector::new(&allow, 1);
+        assert!(matches!(
+            d.streams(&[mic(70, obs())], 0)[..],
+            [Action::Start { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_manual_session_follows_the_call_not_the_recorder() {
+        let mut d = Detector::new(&cfg(), 1);
+        d.streams(&[mic(70, obs())], 0);
+        d.record(1_000).unwrap();
+        // OBS's mic alone is not a call to follow.
+        assert!(d.tick(60_000).is_empty());
+        assert!(!d.following());
+        d.streams(&[mic(70, obs()), mic(88, jitsi())], 61_000);
+        d.tick(81_000);
+        assert!(d.following());
+        d.streams(&[mic(70, obs())], 100_000);
+        assert_eq!(d.tick(115_000), vec![Action::Finish]);
     }
 
     #[test]

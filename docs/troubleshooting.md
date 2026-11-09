@@ -44,6 +44,10 @@ The session ends `stop_grace` (15 s) after no app has the microphone open any mo
 it open after a call (a browser tab left on the call's page, a video room). Close the tab or app,
 or `kute stop`.
 
+Recorders that hold the microphone for their own sake, such as OBS, don't count (see
+`ignore_recorders` in the [config](configuration.md#detect)). If another app keeps the
+microphone open without being part of the call, add it to `ignore_apps`.
+
 ## My voice is in the transcript while I was muted
 
 The call app muted you for the other participants but kept the microphone open, so kute still

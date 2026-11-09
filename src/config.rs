@@ -141,6 +141,9 @@ pub struct DetectConfig {
     pub ignore_apps: Vec<String>,
     /// When set, only these apps trigger a recording.
     pub allow_apps: Option<Vec<String>>,
+    /// Screen and sound recorders (`detect::RECORDERS`, such as OBS) never start a session
+    /// or keep one alive. Off when `allow_apps` is set, which then decides alone.
+    pub ignore_recorders: bool,
     /// A manual session that a call joins (its mic open for `min_duration`) ends with that
     /// call, like an automatic one.
     pub end_manual: bool,
@@ -154,6 +157,7 @@ impl Default for DetectConfig {
             conversation_gap: SignedDuration::from_mins(5),
             ignore_apps: Vec::new(),
             allow_apps: None,
+            ignore_recorders: true,
             end_manual: true,
         }
     }
@@ -394,6 +398,7 @@ mod tests {
         assert_eq!(c.detect.conversation_gap, SignedDuration::from_mins(5));
         assert!(c.detect.ignore_apps.is_empty() && c.detect.allow_apps.is_none());
         assert!(c.detect.end_manual);
+        assert!(c.detect.ignore_recorders);
         assert!(
             !Config::parse("[detect]\nend_manual = false\n")
                 .unwrap()
