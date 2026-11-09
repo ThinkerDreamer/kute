@@ -2,7 +2,7 @@
 name = "kute"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Records, transcribes and summarizes your calls, locally"
 license = "MIT OR Apache-2.0"
 keywords = ["transcription", "whisper", "pipewire", "meetings"]
@@ -22,7 +22,7 @@ jiff = { version = "0.2", features = ["serde"] }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 libc = "0.2"
 notify-rust = "4"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

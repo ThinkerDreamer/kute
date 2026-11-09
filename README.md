@@ -54,7 +54,7 @@ import recordings made elsewhere. See
 
 - Linux with PipeWire (the daemon uses `pw-dump` and `pw-record`)
 - `ffmpeg` and `ffprobe`
-- Rust 1.88 or newer, `cmake` and `clang`
+- Rust 1.89 or newer, `cmake` and `clang`
 - For GPU transcription: Vulkan drivers and headers (`vulkan-headers`, `shaderc`), or CUDA with
   `--no-default-features --features cuda`. Without either it runs on the CPU, more slowly.
 

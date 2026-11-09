@@ -10,7 +10,7 @@ download once with `kute model download` before the first transcription (see [Mo
 - `ffmpeg` and `ffprobe`, for decoding imports and compressing audio to the `opus` format.
 - A desktop session: the daemon talks to the CLI over a socket in `$XDG_RUNTIME_DIR`, and sends
   desktop notifications.
-- To build: Rust 1.88 or newer, a C/C++ toolchain, `cmake` and `clang` (whisper.cpp is compiled
+- To build: Rust 1.89 or newer, a C/C++ toolchain, `cmake` and `clang` (whisper.cpp is compiled
   from source and bound with bindgen).
 - For GPU transcription, one of:
   - **Vulkan** (the default build): Vulkan drivers for your GPU plus the build-time headers and
