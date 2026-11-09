@@ -342,6 +342,13 @@ pub fn pipewire_check(snap: &Snapshot, mic: Option<&str>) -> Check {
 
 /// The compiled-in Whisper backend, and whether the system has what it needs.
 fn gpu(config: &Config) -> Check {
+    if config.transcribe.backend == TranscribeBackend::Command {
+        return Check::ok(
+            "GPU",
+            "transcribe.command transcribes and picks its own device; Whisper's GPU setting \
+             doesn't apply",
+        );
+    }
     let backend = if cfg!(feature = "cuda") {
         "CUDA"
     } else if cfg!(feature = "vulkan") {
@@ -657,6 +664,21 @@ mod tests {
 
     fn level_of(checks: &[Check], what: &str) -> Level {
         checks.iter().find(|c| c.what == what).unwrap().level
+    }
+
+    #[test]
+    fn the_gpu_check_leaves_a_command_backend_alone() {
+        let config = Config::parse(
+            "[transcribe]\nbackend = \"command\"\ncommand = [\"helper\"]\ngpu = false\n",
+        )
+        .unwrap();
+        let check = gpu(&config);
+        assert_eq!(check.level, Level::Ok);
+        assert!(
+            check.detail.contains("transcribe.command"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
