@@ -5,6 +5,26 @@ All notable changes to kute are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
 breaking change bumps the minor version and a fix bumps the patch version.
 
+## [0.4.0] - 2026-11-09
+
+### Added
+
+- **daemon:** Optional low-priority and after-recording processing
+- **summary:** Record why a conversation's summary was skipped
+- **cli:** Add `kute status --json`
+- **transcribe:** Use the CPU by default when the only GPU is integrated
+
+### Fixed
+
+- **deps:** Update rusqlite to 0.41 for the bundled SQLite fix
+- **detect:** Don't let screen and sound recorders hold a call open
+- **tray:** Draw the icons with fills, not strokes
+- **tray:** Show the icon on Cinnamon before 6.8
+
+### Packaging
+
+- Prepare the crate for crates.io
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
@@ -114,6 +134,7 @@ breaking change bumps the minor version and a fix bumps the patch version.
 
 - Install, configuration, privacy, troubleshooting and contributing guides ([#1](https://github.com/ThinkerDreamer/kute/pull/1))
 
+[0.4.0]: https://github.com/ThinkerDreamer/kute/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ThinkerDreamer/kute/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThinkerDreamer/kute/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ThinkerDreamer/kute/releases/tag/v0.1.0
