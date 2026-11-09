@@ -180,7 +180,7 @@ low_priority = true
 
 | Key | Default | |
 |---|---|---|
-| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure or "Recording stopped" notification. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
+| `open` | `["xdg-open"]` | The command that opens `summary.md` when you click a "Summary ready" notification, and the session folder when you click a failure or "Recording stopped" notification or run `kute open`. The path is added as the last argument, e.g. `["kate"]` or `["code"]`. |
 
 ## `[tray]`
 

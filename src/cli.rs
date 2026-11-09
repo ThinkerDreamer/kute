@@ -134,7 +134,7 @@ enum Command {
         #[arg(long, conflicts_with_all = ["codes", "me", "others"])]
         clear: bool,
     },
-    /// Open a session's folder
+    /// Open a session's folder (with notify.open, xdg-open by default)
     Open { id: String },
     /// Summarize again (all conversations, or one)
     Summarize {
@@ -458,10 +458,14 @@ pub fn run() -> Result<()> {
         }
         Command::Open { id } => {
             let session = store.resolve(&id)?;
-            std::process::Command::new("xdg-open")
+            let Some((program, args)) = config.notify.open.split_first() else {
+                bail!("notify.open is empty, so there is nothing to open the folder with");
+            };
+            std::process::Command::new(program)
+                .args(args)
                 .arg(&session.dir)
                 .spawn()
-                .context("running xdg-open")?;
+                .with_context(|| format!("running {program} (notify.open)"))?;
         }
         Command::Summarize {
             id,
