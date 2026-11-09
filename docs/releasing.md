@@ -56,6 +56,20 @@ before merging, fold review fixups into the commit they fix (`git commit --fixup
    `Cargo.toml` and that `CHANGELOG.md` has the section, builds the portable Ubuntu 24.04
    tarball, and publishes a GitHub release with that section as its notes.
 
+6. Publish the crate to crates.io from the tagged commit, with a token from
+   <https://crates.io/settings/tokens> (`cargo login` stores it once):
+
+   ```bash
+   cargo publish --dry-run     # packs the crate and builds it from the tarball
+   cargo publish
+   ```
+
+   A published version can't be replaced or deleted, only yanked, so dry-run first. The
+   `include` list in `Cargo.toml` decides what goes into the crate: the code, the icons and the
+   bench sample it embeds, the tests and their fixtures, the README, changelog and licenses.
+   `cargo package --list` shows the files. The dry run needs the Vulkan headers and `glslc`
+   like any default build; `--no-default-features` checks the CPU build without them.
+
 ## The prebuilt tarball
 
 `scripts/package-tarball.sh [distro]` builds a release binary with `GGML_NATIVE=OFF` (so it

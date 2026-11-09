@@ -5,8 +5,21 @@ edition = "2024"
 rust-version = "1.89"
 description = "Records, transcribes and summarizes your calls, locally"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ThinkerDreamer/kute"
+readme = "README.md"
 keywords = ["transcription", "whisper", "pipewire", "meetings"]
 categories = ["command-line-utilities", "multimedia::audio"]
+# What goes into the crates.io tarball: the code, what it embeds (icons, the bench sample in
+# tests/fixtures), and the tests. Design notes, packaging and helper scripts stay in the repo.
+include = [
+    "/src/**",
+    "/assets/icons/*.svg",
+    "/tests/**",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
 
 [features]
 default = ["vulkan"]
