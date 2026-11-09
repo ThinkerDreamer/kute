@@ -222,6 +222,20 @@ fn a_job_with_another_config_and_archive_runs_here() {
 }
 
 #[test]
+fn a_job_with_the_same_config_but_another_archive_runs_here() {
+    let (tmp, config) = setup();
+    let daemon_dir = tempfile::tempdir().unwrap();
+    let queued = stand_in_daemon(tmp.path(), Some(&config), daemon_dir.path());
+    let out = kute(&config, &["reindex"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(queued.try_recv().is_err(), "the daemon got the job");
+}
+
+#[test]
 fn a_job_with_another_config_on_the_daemons_archive_is_refused() {
     let (tmp, config) = setup();
     let queued = stand_in_daemon(tmp.path(), None, &tmp.path().join("data"));

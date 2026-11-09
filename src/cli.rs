@@ -705,8 +705,8 @@ fn die_quietly_on_closed_pipe() {
 /// Hands a processing job to the daemon if it is running with this config, and prints its
 /// reply. Returns whether it did.
 ///
-/// A daemon with another config would resolve the session in its own archive and process
-/// it with its own settings, so the job runs here instead. If that daemon works on this
+/// A daemon with another config or archive would resolve the session in its own archive and
+/// process it with its own settings, so the job runs here instead. If that daemon works on this
 /// same archive, running here would race its worker on the same sessions: that's an error.
 fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
     // Without a runtime dir there is no socket, so no daemon.
@@ -719,8 +719,11 @@ fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
             config: theirs,
             archive,
         }) => {
-            if theirs != config.source {
-                if same_dir(&archive, store.root()) {
+            // The same config can still mean another archive (`[storage] dir` unset and
+            // another XDG_DATA_HOME), so both have to match.
+            let same_archive = same_dir(&archive, store.root());
+            if theirs != config.source || !same_archive {
+                if same_archive {
                     bail!(
                         "the running daemon uses {} on this archive, not {}; stop it first \
                          (systemctl --user stop kute), or give this config its own \
