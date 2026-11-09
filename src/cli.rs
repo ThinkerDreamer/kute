@@ -43,11 +43,13 @@ enum Command {
     /// Show what the daemon is doing
     Status {
         /// Print it as JSON, for scripts: `"running": false` when no daemon is running,
-        /// `"recording": true` while a call is being recorded
+        /// `"recording": true` while kute captures audio (from the moment a mic opens, before
+        /// it counts as a call, until the session ends)
         #[arg(long)]
         json: bool,
     },
-    /// Start recording now; it goes on until `kute stop`
+    /// Start recording now; it goes on until `kute stop`, or until a call it follows ends
+    /// (unless detect.end_manual = false)
     Record { title: Vec<String> },
     /// Stop the current recording and process it
     Stop,
