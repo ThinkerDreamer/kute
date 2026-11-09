@@ -70,7 +70,7 @@ pub enum Response {
     Identity {
         /// The daemon's config file (canonical), or `None` when it runs on the defaults.
         config: Option<PathBuf>,
-        /// The daemon's archive (storage root).
+        /// The daemon's archive (storage root), absolute.
         archive: PathBuf,
     },
 }

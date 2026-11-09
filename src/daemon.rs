@@ -285,7 +285,10 @@ impl Daemon {
             Request::Identity => {
                 return Ok(Response::Identity {
                     config: self.config.source.clone(),
-                    archive: self.store.root().to_path_buf(),
+                    // Absolute, so a client in another working directory compares the
+                    // same folder.
+                    archive: std::fs::canonicalize(self.store.root())
+                        .unwrap_or_else(|_| self.store.root().to_path_buf()),
                 });
             }
             Request::Record { title } => {

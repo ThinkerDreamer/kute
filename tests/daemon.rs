@@ -1079,5 +1079,5 @@ fn identity_names_the_config_and_archive() {
         panic!("expected an identity");
     };
     assert_eq!(config, None);
-    assert_eq!(archive, h.store.root());
+    assert_eq!(archive, std::fs::canonicalize(h.store.root()).unwrap());
 }
