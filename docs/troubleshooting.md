@@ -113,9 +113,11 @@ The log (`journalctl --user -u kute`) says why after each click, e.g. `xdg-open 
 - **GNOME has no tray of its own.** Install the AppIndicator and KStatusNotifierItem Support
   extension. `kute doctor` says whether a tray host is running.
 - **A blank or generic icon?** kute writes its icons to `~/.local/share/kute/icons` when the
-  daemon starts and tells the tray host to look there. A host that ignores that folder shows
-  nothing or its own fallback; if the folder can't be written, kute uses the theme's mic, red dot
-  and pause icons instead (the log says why).
+  daemon starts and tells the tray host to look there. It also adds them to
+  `~/.local/share/icons/hicolor/scalable/apps`, where hosts that ignore kute's folder (Cinnamon
+  before 6.8) find them by name. A panel that was already running may need a restart to notice
+  them: on Cinnamon, press Alt+F2, type `r` and Enter, or log out and back in. If kute's folder
+  can't be written, kute uses the theme's mic, red dot and pause icons instead (the log says why).
 
 ## `kute` says it can't reach the daemon or `XDG_RUNTIME_DIR` is not set
 

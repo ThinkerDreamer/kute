@@ -174,7 +174,10 @@ impl Icon {
     const ALL: [Icon; 3] = [Icon::Listening, Icon::Recording, Icon::Paused];
 
     /// kute's own icon: an ear and a mic ("kute" is to listen, and the ear, in Toki Pona).
-    /// Symbolic, so Plasma recolours it to the panel's theme; the recording mic stays red.
+    /// Symbolic, so the panel recolours it to its theme; the recording mic stays red. Every
+    /// shape is filled, not stroked: GTK recolours a symbolic icon by filling each shape, so
+    /// a stroked line would come out as a blob. Plasma reads the `ColorScheme-*` classes,
+    /// GTK the `error` class.
     fn own(self) -> (&'static str, &'static str) {
         match self {
             Icon::Listening => (
@@ -220,12 +223,30 @@ fn write_icons(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Where the user's own hicolor icons go: GTK finds an icon there by name, from any theme.
+fn hicolor_icons(data: &std::path::Path) -> std::path::PathBuf {
+    data.join("icons/hicolor/scalable/apps")
+}
+
 /// `~/.local/share/kute/icons`, once kute's icons are written there.
+///
+/// They go into the user's hicolor theme as well. Cinnamon before 6.8 draws nothing for a
+/// symbolic icon that is only in the tray's icon theme path: its tray host hands the panel
+/// the file's path, which the panel then looks up as an icon name. One the theme has is
+/// passed by name instead, and drawn.
 fn own_icons() -> Option<std::path::PathBuf> {
-    let dir = dirs::data_dir()?.join("kute").join("icons");
+    let data = dirs::data_dir()?;
+    let dir = data.join("kute").join("icons");
     write_icons(&dir)
         .inspect_err(|e| eprintln!("kute: using the theme's tray icons: {e:#}"))
         .ok()?;
+    let hicolor = hicolor_icons(&data);
+    if let Err(e) = write_icons(&hicolor) {
+        eprintln!(
+            "kute: can't add the tray icons to {}: {e:#}",
+            hicolor.display()
+        );
+    }
     Some(dir)
 }
 
@@ -660,6 +681,8 @@ mod tests {
             assert_eq!(written, svg);
             // Plasma recolours symbolic icons through this stylesheet.
             assert!(svg.contains("current-color-scheme"), "{name}");
+            // GTK fills every shape when it recolours one, so a stroke would turn into a blob.
+            assert!(!svg.contains("stroke"), "{name}");
         }
         // Again over the same files: nothing to change, and no error.
         write_icons(&icons).unwrap();
