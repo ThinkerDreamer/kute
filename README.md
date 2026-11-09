@@ -98,6 +98,7 @@ the call's title, who else is on it, its languages and notes for the summary, in
 
 ```bash
 kute status                 # idle, recording, ...; the current session; the queue
+kute status --json          # the same for scripts; "recording": true while a call is recorded
 kute record "Standup"       # record now, until `kute stop` or the call ends
 kute stop                   # end the current session now
 kute discard                # end it and delete it

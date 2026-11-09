@@ -3,7 +3,7 @@
 use crate::bench;
 use crate::config::{Config, SummaryBackend, TranscribeBackend};
 use crate::daemon;
-use crate::detect::{Action, Detector, replay};
+use crate::detect::{Action, Detector, Phase, replay};
 use crate::doctor;
 use crate::index::HitKind;
 use crate::ipc::{self, Request, Response, Status};
@@ -41,7 +41,12 @@ enum Command {
     /// Run the daemon: detect, record and process calls (normally started by systemd)
     Daemon,
     /// Show what the daemon is doing
-    Status,
+    Status {
+        /// Print it as JSON, for scripts: `"running": false` when no daemon is running,
+        /// `"recording": true` while a call is being recorded
+        #[arg(long)]
+        json: bool,
+    },
     /// Start recording now; it goes on until `kute stop`
     Record { title: Vec<String> },
     /// Stop the current recording and process it
@@ -313,7 +318,8 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Command::Daemon => daemon::run(store, config)?,
-        Command::Status => control(Request::Status)?,
+        Command::Status { json: false } => control(Request::Status)?,
+        Command::Status { json: true } => status_json()?,
         Command::Record { title } => control(Request::Record {
             title: (!title.is_empty()).then(|| title.join(" ")),
         })?,
@@ -680,6 +686,34 @@ fn control(request: Request) -> Result<()> {
     Ok(())
 }
 
+/// Prints the daemon's status as one line of JSON. No daemon is not an error here: a script
+/// asking whether it may restart kute wants an answer either way.
+fn status_json() -> Result<()> {
+    let status = match ipc::request(&ipc::socket_path()?, &Request::Status)? {
+        None => None,
+        Some(Response::Status { status }) => Some(status),
+        Some(Response::Error { message }) => bail!("{message}"),
+        Some(_) => bail!("the daemon sent another reply instead of its status"),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&status_document(status.as_ref()))?
+    );
+    Ok(())
+}
+
+/// What `kute status --json` prints: the daemon's status plus `running` and `recording`.
+fn status_document(status: Option<&Status>) -> serde_json::Value {
+    let Some(status) = status else {
+        return serde_json::json!({ "running": false, "recording": false });
+    };
+    let mut doc = serde_json::to_value(status).expect("a status always serializes");
+    doc["running"] = true.into();
+    // Grace is still a recording: the call may come back.
+    doc["recording"] = (status.phase != Phase::Idle).into();
+    doc
+}
+
 fn print_status(status: &Status) {
     let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
     println!("phase: {}", format!("{:?}", status.phase).to_lowercase());
@@ -918,6 +952,31 @@ fn model_list(store: &Store, config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_json_says_whether_a_call_is_being_recorded() {
+        assert_eq!(
+            status_document(None),
+            serde_json::json!({ "running": false, "recording": false })
+        );
+        let mut status = Status {
+            phase: Phase::Grace,
+            paused: false,
+            session: Some("2026-10-08T090000".into()),
+            app: Some("Firefox".into()),
+            queued: 1,
+            retrying: 0,
+            running_job: None,
+        };
+        let doc = status_document(Some(&status));
+        assert_eq!(doc["running"], true);
+        assert_eq!(doc["recording"], true);
+        assert_eq!(doc["phase"], "grace");
+        assert_eq!(doc["queued"], 1);
+        assert_eq!(doc["session"], "2026-10-08T090000");
+        status.phase = Phase::Idle;
+        assert_eq!(status_document(Some(&status))["recording"], false);
+    }
 
     fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {
         let mut progress = Progress::new("m", tty);
