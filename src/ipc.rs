@@ -37,6 +37,10 @@ pub enum Request {
     Job {
         job: Job,
     },
+    /// Delete a session that isn't recording, with what is queued for it.
+    Delete {
+        id: String,
+    },
     /// Which config and archive the daemon runs with, so a command can tell whether its
     /// jobs mean the same to the daemon.
     Identity,
@@ -260,6 +264,11 @@ impl DaemonClient {
     /// Queues a job; returns the daemon's reply, e.g. "queued process …".
     pub fn queue(&self, job: &Job) -> Result<Option<String>> {
         self.send(&Request::Job { job: job.clone() })
+    }
+
+    /// Deletes a session that isn't recording; returns the daemon's reply.
+    pub fn delete(&self, id: &str) -> Result<Option<String>> {
+        self.send(&Request::Delete { id: id.into() })
     }
 
     /// Sends a request that the daemon answers with a message. `Ok(None)` when the daemon

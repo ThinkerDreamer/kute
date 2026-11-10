@@ -20,7 +20,7 @@ use crate::transcribe::SpeechDetector;
 use crate::transcribe::whisper::SileroVad;
 use crate::tray::{Tray, TrayAction};
 use crate::worker::{self, WorkerDone, WorkerMsg};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -335,6 +335,19 @@ impl Daemon {
                 self.detect(|d| d.streams(&streams, now_ms))?;
                 "resumed".into()
             }
+            Request::Delete { id } => {
+                let session = self.store.session(&id)?;
+                if self.live.as_ref().is_some_and(|l| l.id() == id) {
+                    bail!("{id} is still recording; `kute discard` stops and deletes it");
+                }
+                // Forgotten even when only part of the folder went: its jobs would only
+                // fail on what is left.
+                let deleted = session.delete();
+                self.forget(&id, true);
+                deleted?;
+                eprintln!("kute: deleted {id}");
+                format!("deleted {id}")
+            }
             Request::Job { job } => {
                 let message = format!("queued {job}");
                 self.enqueue(job)?;
@@ -357,6 +370,14 @@ impl Daemon {
             Ok(_) => eprintln!("kute: {}: done", done.job),
             Err(e) => eprintln!("kute: {} failed: {e}", done.job),
         }
+        // An import can take an id freed by a delete while it ran (same start time). The
+        // session it made is a new one, so none of the cleanup below is for it.
+        if matches!(done.job, Job::Import { .. })
+            && let Some(id) = &done.session
+            && self.store.session(id).is_ok()
+        {
+            self.discarded.retain(|d| d != id);
+        }
         if let Ok(outcome) = &done.result {
             self.announce_summaries(outcome);
         }
@@ -364,6 +385,10 @@ impl Daemon {
         let discarded = std::mem::take(&mut self.discarded);
         for id in &discarded {
             unindex(&self.store, id);
+            // The job may have written into the folder after it was removed (a summary
+            // creates its folder), leaving a stray copy behind. Which session a failed import
+            // was on isn't always known, so this checks every one deleted while it ran.
+            remove_leftovers(&self.store, id);
         }
         // Always `Process`, even after an `Import`: the session exists now.
         if let (Some(delay), Some(id)) = (done.retry_after, done.session)
@@ -397,6 +422,16 @@ impl Daemon {
     /// A notification for what a job left failed, once nothing more will happen on its own
     /// (a transcription with retries left waits for them), or for a job that failed outright.
     fn announce_problems(&self, done: &WorkerDone) {
+        // A job whose session was discarded or deleted while it ran fails on the missing
+        // folder; that is no news.
+        if done
+            .job
+            .session()
+            .or(done.session.as_deref())
+            .is_some_and(|id| self.discarded.iter().any(|d| d == id))
+        {
+            return;
+        }
         if done.problems.is_empty() {
             if let Err(e) = &done.result {
                 self.notifier
@@ -591,6 +626,19 @@ impl Daemon {
             .as_ref()
             .map(|l| l.id().to_owned())
             .unwrap_or_default()
+    }
+}
+
+/// Removes what a job wrote into a session folder that was deleted or discarded under it.
+/// A job can't bring back `meta.toml` (it can only update one that is there), so a folder
+/// that has one is a new session that took the freed id, say an import, and stays.
+fn remove_leftovers(store: &Store, id: &str) {
+    let dir = store.sessions_dir().join(id);
+    if dir.exists()
+        && !dir.join("meta.toml").exists()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        eprintln!("kute: removing what is left of {id}: {e}");
     }
 }
 
@@ -792,6 +840,167 @@ mod tests {
             worker.try_recv(),
             Ok(WorkerMsg::Run(Job::Process { id: queued })) if queued == id
         ));
+    }
+
+    #[test]
+    fn delete_removes_a_session_but_not_the_one_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let (tx, _worker) = mpsc::channel();
+        let mut d = Daemon::new(
+            store.clone(),
+            Config::default(),
+            Box::new(FakeSource::default()),
+            run_vad(),
+            tx,
+        );
+        let old = store
+            .create_session(&"2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap())
+            .unwrap();
+        let old_id = old.id.clone();
+        let meta = crate::store::Meta::new(
+            old_id.clone(),
+            "2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap(),
+            crate::store::Trigger {
+                kind: crate::store::TriggerKind::Import,
+                app_name: None,
+                binary: None,
+            },
+            "auto".into(),
+        );
+        old.save_meta(&meta).unwrap();
+        d.queue.push_back(Job::Process { id: old_id.clone() });
+        d.control(Request::Record { title: None }, 0).unwrap();
+        let live = d.live_id();
+        assert!(
+            d.control(Request::Delete { id: live.clone() }, 1_000)
+                .is_err()
+        );
+        assert!(store.session(&live).is_ok());
+        d.control(Request::Delete { id: old_id.clone() }, 1_000)
+            .unwrap();
+        assert!(store.session(&old_id).is_err());
+        assert!(d.queue.iter().all(|j| j.session() != Some(old_id.as_str())));
+    }
+
+    #[test]
+    fn what_a_job_writes_into_a_deleted_session_goes_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("kute")).unwrap();
+        let (tx, _worker) = mpsc::channel();
+        let mut d = Daemon::new(
+            store.clone(),
+            Config::default(),
+            Box::new(FakeSource::default()),
+            run_vad(),
+            tx,
+        );
+        let session = store
+            .create_session(&"2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap())
+            .unwrap();
+        let id = session.id.clone();
+        let meta = crate::store::Meta::new(
+            id.clone(),
+            "2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap(),
+            crate::store::Trigger {
+                kind: crate::store::TriggerKind::Import,
+                app_name: None,
+                binary: None,
+            },
+            "auto".into(),
+        );
+        session.save_meta(&meta).unwrap();
+        let job = Job::Summarize {
+            id: id.clone(),
+            conversation: None,
+            lang: None,
+            backend: None,
+        };
+        d.running = Some(job.clone());
+        d.control(Request::Delete { id: id.clone() }, 0).unwrap();
+        // The summary the job was writing lands after the folder is gone.
+        std::fs::create_dir_all(session.summaries_dir()).unwrap();
+        d.done(
+            WorkerDone {
+                job,
+                result: Err("no session".into()),
+                retry_after: None,
+                session: Some(id.clone()),
+                problems: crate::jobs::Problems::default(),
+            },
+            1_000,
+        )
+        .unwrap();
+        assert!(!session.dir.exists());
+
+        // A new session that took the freed id (an import with the same start) stays, and is
+        // still treated as a live one: it keeps its retry.
+        let import = Job::Import {
+            me: "me.wav".into(),
+            others: "others.wav".into(),
+            start: Some("2026-10-19T10:00:00".into()),
+            title: None,
+            languages: Default::default(),
+            process: true,
+        };
+        let reused = store
+            .create_session(&"2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap())
+            .unwrap();
+        assert_eq!(reused.id, id);
+        reused.save_meta(&meta).unwrap();
+        d.running = Some(import.clone());
+        d.discarded.push(id.clone());
+        d.done(
+            WorkerDone {
+                job: import,
+                result: Ok(Default::default()),
+                retry_after: Some(std::time::Duration::from_secs(60)),
+                session: Some(id.clone()),
+                problems: crate::jobs::Problems::default(),
+            },
+            1_500,
+        )
+        .unwrap();
+        assert!(reused.meta_path().is_file());
+        assert!(
+            d.retries
+                .iter()
+                .any(|(_, job)| job.session() == Some(id.as_str()))
+        );
+        d.retries.clear();
+        reused.delete().unwrap();
+
+        // An import whose session isn't known from its result.
+        let session = store
+            .create_session(&"2026-10-20T10:00:00+02:00[+02:00]".parse().unwrap())
+            .unwrap();
+        let id = session.id.clone();
+        session.save_meta(&meta).unwrap();
+        let job = Job::Import {
+            me: "me.wav".into(),
+            others: "others.wav".into(),
+            start: None,
+            title: None,
+            languages: Default::default(),
+            process: true,
+        };
+        d.running = Some(job.clone());
+        d.control(Request::Delete { id: id.clone() }, 2_000)
+            .unwrap();
+        std::fs::create_dir_all(session.summaries_dir()).unwrap();
+        d.done(
+            WorkerDone {
+                job,
+                result: Err("no session".into()),
+                // A failed import doesn't always say which session it made.
+                retry_after: None,
+                session: None,
+                problems: crate::jobs::Problems::default(),
+            },
+            3_000,
+        )
+        .unwrap();
+        assert!(!session.dir.exists());
     }
 
     #[test]

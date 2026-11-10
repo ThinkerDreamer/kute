@@ -140,6 +140,14 @@ enum Command {
         #[arg(long, conflicts_with_all = ["codes", "me", "others"])]
         clear: bool,
     },
+    /// Delete sessions for good: their audio, transcripts, summaries and search entries
+    Delete {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Don't ask first
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Open a session's folder (with notify.open, xdg-open by default)
     Open { id: String },
     /// Summarize a session again (all its conversations, or one with --conversation), or
@@ -456,6 +464,7 @@ pub fn run() -> Result<()> {
                 )?;
             }
         }
+        Command::Delete { ids, yes } => delete(&store, &config, &ids, yes)?,
         Command::Open { id } => {
             let session = store.resolve(&id)?;
             let Some((program, args)) = config.notify.open.split_first() else {
@@ -953,6 +962,73 @@ fn summarize_all(store: &Store, config: &Config, backend: Option<SummaryBackend>
     )
 }
 
+/// `kute delete`: asks first (unless `yes`), then has the daemon delete the sessions, or
+/// deletes them here when no daemon runs. The daemon refuses the one it is recording.
+fn delete(store: &Store, config: &Config, ids: &[String], yes: bool) -> Result<()> {
+    let mut sessions: Vec<Session> = Vec::new();
+    for id in ids {
+        let session = store.resolve(id)?;
+        if !sessions.iter().any(|s| s.id == session.id) {
+            sessions.push(session);
+        }
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("kute delete asks before deleting; pass --yes to delete without asking");
+        }
+        for session in &sessions {
+            let title = session
+                .load_meta()
+                .ok()
+                .and_then(|m| m.title)
+                .unwrap_or_else(|| "-".into());
+            println!("{}  {title}", session.id);
+        }
+        print!(
+            "Delete {} session(s) with their audio, transcripts and summaries? [y/N] ",
+            sessions.len()
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("nothing deleted");
+            return Ok(());
+        }
+    }
+    let daemon = DaemonClient::connect(store.root(), config.source.as_deref())?;
+    let total = sessions.len();
+    let mut failed = 0;
+    for session in sessions {
+        let id = session.id.clone();
+        // `None`: no daemon, or it stopped meanwhile.
+        let deleted = match &daemon {
+            Some(daemon) => daemon.delete(&id).map(|reply| reply.is_some()),
+            None => Ok(false),
+        };
+        // The search rows go first: if that fails, the session is still whole, and
+        // `kute delete` can be run again.
+        let deleted = deleted.and_then(|deleted| {
+            if !deleted {
+                pipeline::open_index(store)?.delete_session(&id)?;
+                session.delete()?;
+            }
+            Ok(())
+        });
+        match deleted {
+            Ok(()) => println!("deleted {id}"),
+            Err(e) => {
+                eprintln!("kute: {id}: {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {total} session(s) could not be deleted");
+    }
+    Ok(())
+}
+
 fn list(store: &Store, since: Option<&str>) -> Result<()> {
     let cutoff = match since {
         Some(s) => {
@@ -1211,6 +1287,8 @@ mod tests {
         assert!(parse(&["process"]).is_err());
         assert!(parse(&["summarize", "x", "--all"]).is_err());
         assert!(parse(&["summarize", "--all", "--lang", "it"]).is_err());
+        assert!(parse(&["delete"]).is_err());
+        assert!(parse(&["delete", "x", "y", "--yes"]).is_ok());
     }
 
     fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {

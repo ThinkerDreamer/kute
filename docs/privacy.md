@@ -58,8 +58,8 @@ While a call is being recorded and processed, the audio is kept as WAV and compr
 ## Deleting recordings
 
 - During a call, `kute discard` stops recording and deletes the session.
-- Afterwards, delete the session's folder under `sessions/` and run `kute reindex` so search
-  forgets it.
+- Afterwards, `kute delete <id>` deletes the session's folder and its search entries. It asks
+  first; `--yes` skips the question.
 
 ## Keeping kute out of a call
 
