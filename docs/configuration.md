@@ -126,6 +126,13 @@ backend = "command"
 command = ["ollama", "run", "qwen3:8b"]
 ```
 
+```toml
+[summary]
+backend = "command"
+# Codex runs outside a git repository here, hence the flag; add --model to pick one.
+command = ["codex", "exec", "--skip-git-repo-check"]
+```
+
 ### `openai`: OpenAI-compatible endpoints
 
 Any server with an OpenAI-style `/chat/completions` endpoint: Ollama, llama.cpp's server, vLLM,
