@@ -197,6 +197,101 @@ pub fn request(path: &Path, req: &Request) -> Result<Option<Response>> {
     Ok(Some(response))
 }
 
+/// A daemon running with the caller's config on the caller's archive: the one to hand work
+/// to.
+#[derive(Debug)]
+pub struct DaemonClient {
+    path: PathBuf,
+}
+
+impl DaemonClient {
+    /// The daemon at the usual socket, if one runs with `config` (its path; `None` for the
+    /// default settings) on `archive`.
+    ///
+    /// A daemon with another config or archive would resolve sessions in its own archive and
+    /// process them with its own settings, so it isn't ours: `Ok(None)`, and the work runs
+    /// in the caller. One with another config on this same archive would race the caller on
+    /// the same sessions: that's an error.
+    pub fn connect(archive: &Path, config: Option<&Path>) -> Result<Option<DaemonClient>> {
+        // Without a runtime dir there is no socket, so no daemon.
+        let Ok(path) = socket_path() else {
+            return Ok(None);
+        };
+        DaemonClient::connect_at(path, archive, config)
+    }
+
+    fn connect_at(
+        path: PathBuf,
+        archive: &Path,
+        config: Option<&Path>,
+    ) -> Result<Option<DaemonClient>> {
+        match request(&path, &Request::Identity)? {
+            None => return Ok(None),
+            Some(Response::Identity {
+                config: theirs,
+                archive: their_archive,
+            }) => {
+                // The same config can still mean another archive (`[storage] dir` unset and
+                // another XDG_DATA_HOME), so both have to match.
+                let same_archive = same_dir(&their_archive, archive);
+                if theirs.as_deref() != config || !same_archive {
+                    if same_archive {
+                        bail!(
+                            "the running daemon uses {} on this archive, not {}; stop it first \
+                             (systemctl --user stop kute), or give this config its own \
+                             [storage] dir",
+                            describe_config(theirs.as_deref()),
+                            describe_config(config),
+                        );
+                    }
+                    return Ok(None);
+                }
+            }
+            // A daemon from before `Identity` (not restarted since an upgrade) can't parse the
+            // request: take it as ours, as kute did then. Any other error (a daemon too busy
+            // to answer, or shutting down) says nothing about its config, so it stops here.
+            Some(Response::Error { message }) if message.starts_with(BAD_REQUEST) => {}
+            Some(Response::Error { message }) => bail!("{message}"),
+            Some(_) => bail!("the daemon sent another reply instead of its identity"),
+        }
+        Ok(Some(DaemonClient { path }))
+    }
+
+    /// Queues a job; returns the daemon's reply, e.g. "queued process …".
+    pub fn queue(&self, job: &Job) -> Result<Option<String>> {
+        self.send(&Request::Job { job: job.clone() })
+    }
+
+    /// Sends a request that the daemon answers with a message. `Ok(None)` when the daemon
+    /// went away since `connect`.
+    fn send(&self, request: &Request) -> Result<Option<String>> {
+        match self::request(&self.path, request)? {
+            None => Ok(None),
+            Some(Response::Ok { message }) => Ok(Some(message)),
+            Some(Response::Error { message }) if message.starts_with(BAD_REQUEST) => bail!(
+                "the running daemon is older than this kute; restart it \
+                 (systemctl --user restart kute) and try again"
+            ),
+            Some(Response::Error { message }) => bail!("{message}"),
+            Some(Response::Status { .. } | Response::Identity { .. }) => {
+                bail!("the daemon sent another reply instead of an answer")
+            }
+        }
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canonical(a) == canonical(b)
+}
+
+fn describe_config(source: Option<&Path>) -> String {
+    match source {
+        Some(path) => path.display().to_string(),
+        None => "the default settings".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +363,41 @@ mod tests {
             panic!("expected an Ok reply");
         };
         assert_eq!(serde_json::from_str::<Request>(&message).unwrap(), req);
+    }
+
+    #[test]
+    fn a_daemon_is_ours_only_with_our_config_and_archive() {
+        let dir = tmp();
+        let path = dir.path().join("k.sock");
+        let (tx, rx) = channel();
+        serve(&path, tx).unwrap();
+        answer_with(rx, |req| match req {
+            Request::Identity => Response::Identity {
+                config: Some("/etc/kute.toml".into()),
+                archive: "/".into(),
+            },
+            _ => Response::Ok {
+                message: "queued".into(),
+            },
+        });
+        let connect = |archive: &Path, config: Option<&str>| {
+            DaemonClient::connect_at(path.clone(), archive, config.map(Path::new))
+        };
+        let ours = connect(Path::new("/"), Some("/etc/kute.toml")).unwrap();
+        let reply = ours.expect("ours").queue(&Job::Reindex).unwrap();
+        assert_eq!(reply.as_deref(), Some("queued"));
+        // Another archive: not ours, the work runs in the caller.
+        assert!(connect(dir.path(), None).unwrap().is_none());
+        // Another config on its archive would race it.
+        let err = connect(Path::new("/"), None).unwrap_err();
+        assert!(err.to_string().contains("stop it first"), "{err:#}");
+        // No daemon at all.
+        let missing = dir.path().join("missing.sock");
+        assert!(
+            DaemonClient::connect_at(missing, Path::new("/"), None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::daemon;
 use crate::detect::{Action, Detector, Phase, replay};
 use crate::doctor;
 use crate::index::HitKind;
-use crate::ipc::{self, Request, Response, Status};
+use crate::ipc::{self, DaemonClient, Request, Response, Status};
 use crate::jobs::{self, ConversationsFailed, Job};
 use crate::models;
 use crate::pipeline;
@@ -19,7 +19,7 @@ use crate::transcribe::parse_languages;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -742,73 +742,21 @@ fn die_quietly_on_closed_pipe() {
     }
 }
 
-/// Hands a processing job to the daemon if it is running with this config, and prints its
-/// reply. Returns whether it did.
-///
-/// A daemon with another config or archive would resolve the session in its own archive and
-/// process it with its own settings, so the job runs here instead. If that daemon works on this
-/// same archive, running here would race its worker on the same sessions: that's an error.
+/// Hands a processing job to the daemon if one runs with this config on this archive (see
+/// `DaemonClient::connect`), and prints its reply. Returns whether it did.
 fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
-    // Without a runtime dir there is no socket, so no daemon.
-    let Ok(path) = ipc::socket_path() else {
+    let Some(daemon) = DaemonClient::connect(store.root(), config.source.as_deref())? else {
         return Ok(false);
     };
-    match ipc::request(&path, &Request::Identity)? {
-        None => return Ok(false),
-        Some(Response::Identity {
-            config: theirs,
-            archive,
-        }) => {
-            // The same config can still mean another archive (`[storage] dir` unset and
-            // another XDG_DATA_HOME), so both have to match.
-            let same_archive = same_dir(&archive, store.root());
-            if theirs != config.source || !same_archive {
-                if same_archive {
-                    bail!(
-                        "the running daemon uses {} on this archive, not {}; stop it first \
-                         (systemctl --user stop kute), or give this config its own \
-                         [storage] dir",
-                        describe_config(theirs.as_deref()),
-                        describe_config(config.source.as_deref()),
-                    );
-                }
-                return Ok(false);
-            }
-        }
-        // A daemon from before `Identity` (not restarted since an upgrade) can't parse the
-        // request: queue the job, as kute did then. Any other error (a daemon too busy to
-        // answer, or shutting down) says nothing about its config, so it stops here.
-        Some(Response::Error { message }) if message.starts_with(ipc::BAD_REQUEST) => {}
-        Some(Response::Error { message }) => bail!("{message}"),
-        Some(_) => bail!("the daemon sent another reply instead of its identity"),
-    }
-    match ipc::request(&path, &Request::Job { job: job.clone() })? {
-        None => Ok(false),
-        Some(Response::Ok { message }) => {
-            // Until there are notifications, failures only show up in the daemon's log.
-            println!(
-                "{message}; the daemon logs the result (journalctl --user -u kute, or the \
-                 terminal running kute daemon)"
-            );
-            Ok(true)
-        }
-        Some(Response::Error { message }) => bail!("{message}"),
-        Some(Response::Status { .. } | Response::Identity { .. }) => {
-            bail!("the daemon sent another reply instead of an answer")
-        }
-    }
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    canonical(a) == canonical(b)
-}
-
-fn describe_config(source: Option<&Path>) -> String {
-    match source {
-        Some(path) => path.display().to_string(),
-        None => "the default settings".into(),
-    }
+    let Some(message) = daemon.queue(job)? else {
+        return Ok(false);
+    };
+    // Until there are notifications, failures only show up in the daemon's log.
+    println!(
+        "{message}; the daemon logs the result (journalctl --user -u kute, or the \
+         terminal running kute daemon)"
+    );
+    Ok(true)
 }
 
 /// Queues a processing job on the daemon, or runs it here when there is no daemon.
