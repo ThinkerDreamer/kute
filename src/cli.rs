@@ -13,7 +13,7 @@ use crate::pipeline;
 use crate::pw::trace;
 use crate::render;
 use crate::service;
-use crate::store::{LanguageChange, SessionState, SkipReason, Stage, Store, Track};
+use crate::store::{LanguageChange, Meta, Session, SessionState, SkipReason, Stage, Store, Track};
 use crate::time;
 use crate::transcribe::parse_languages;
 use anyhow::{Context, Result, bail};
@@ -75,7 +75,13 @@ enum Command {
         no_process: bool,
     },
     /// Finish any outstanding transcription, summaries and compression for a session
-    Process { id: String },
+    Process {
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Every session with work left (failed or unfinished transcriptions and summaries)
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+    },
     /// List sessions
     List {
         /// Only sessions newer than this, e.g. 7d or 12h
@@ -136,9 +142,15 @@ enum Command {
     },
     /// Open a session's folder (with notify.open, xdg-open by default)
     Open { id: String },
-    /// Summarize again (all conversations, or one)
+    /// Summarize a session again (all its conversations, or one with --conversation), or
+    /// with --all every conversation in every session that has no summary yet
     Summarize {
-        id: String,
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Every conversation in every session that has no summary yet: never summarized
+        /// (no summarizer was set up) or failed. Ones too short to summarize stay skipped
+        #[arg(long, conflicts_with_all = ["id", "conversation", "lang"])]
+        all: bool,
         #[arg(long)]
         conversation: Option<u32>,
         /// Summary language for this session, e.g. it (saved in meta.toml)
@@ -349,20 +361,8 @@ pub fn run() -> Result<()> {
                 process: !no_process,
             },
         )?,
-        Command::Process { id } => {
-            let session = store.resolve(&id)?;
-            let job = Job::Process {
-                id: session.id.clone(),
-            };
-            if !queue_on_daemon(&store, &config, &job)? {
-                // The daemon's worker processes a recording session's closed conversations;
-                // a second process doing the same at the same time would race it.
-                if session.load_meta()?.state == SessionState::Recording {
-                    bail!("session {} is still recording", session.id);
-                }
-                run_foreground(&store, &config, &job)?;
-            }
-        }
+        Command::Process { id: Some(id), .. } => process(&store, &config, &store.resolve(&id)?)?,
+        Command::Process { id: None, .. } => process_all(&store, &config)?,
         Command::List { since } => list(&store, since.as_deref())?,
         Command::Show { id, summary } => {
             let session = store.resolve(&id)?;
@@ -468,10 +468,14 @@ pub fn run() -> Result<()> {
                 .with_context(|| format!("running {program} (notify.open)"))?;
         }
         Command::Summarize {
-            id,
+            id: None, backend, ..
+        } => summarize_all(&store, &config, backend.map(Into::into))?,
+        Command::Summarize {
+            id: Some(id),
             conversation,
             lang,
             backend,
+            ..
         } => run_job(
             &store,
             &config,
@@ -783,6 +787,172 @@ fn run_foreground(store: &Store, config: &Config, job: &Job) -> Result<()> {
     Ok(())
 }
 
+/// `kute process <id>`: on the daemon, or here when none runs.
+fn process(store: &Store, config: &Config, session: &Session) -> Result<()> {
+    let job = Job::Process {
+        id: session.id.clone(),
+    };
+    if !queue_on_daemon(store, config, &job)? {
+        // The daemon's worker processes a recording session's closed conversations;
+        // a second process doing the same at the same time would race it.
+        if session.load_meta()?.state == SessionState::Recording {
+            bail!("session {} is still recording", session.id);
+        }
+        run_foreground(store, config, &job)?;
+    }
+    Ok(())
+}
+
+/// Whether `kute process --all` has work for this session: a conversation not yet
+/// transcribed or summarized (or failed at it), or a session left processing.
+fn needs_processing(meta: &Meta) -> bool {
+    match meta.state {
+        SessionState::Recording => false,
+        SessionState::Processing => true,
+        SessionState::Done => meta
+            .conversations
+            .iter()
+            .any(|c| c.needs_transcription() || c.needs_summary()),
+    }
+}
+
+/// The sessions to go through for `--all`, oldest first, skipping ones whose meta can't be
+/// read.
+fn sessions_with_meta(store: &Store) -> Result<Vec<(Session, Meta)>> {
+    let mut sessions = Vec::new();
+    for session in store.list()? {
+        match session.load_meta() {
+            Ok(meta) => sessions.push((session, meta)),
+            Err(e) => eprintln!("kute: skipping {}: {e:#}", session.id),
+        }
+    }
+    Ok(sessions)
+}
+
+/// Runs `each` on every session it picks; a failure is printed and the rest still run.
+fn for_each_session(
+    picked: Vec<(Session, Meta)>,
+    nothing: &str,
+    mut each: impl FnMut(&Session, &Meta) -> Result<()>,
+) -> Result<()> {
+    if picked.is_empty() {
+        println!("{nothing}");
+        return Ok(());
+    }
+    let mut failed = 0;
+    for (session, meta) in &picked {
+        if let Err(e) = each(session, meta) {
+            eprintln!("kute: {}: {e:#}", session.id);
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} session(s) failed", picked.len());
+    }
+    Ok(())
+}
+
+fn process_all(store: &Store, config: &Config) -> Result<()> {
+    let picked = sessions_with_meta(store)?
+        .into_iter()
+        .filter(|(_, meta)| needs_processing(meta))
+        .collect();
+    for_each_session(picked, "no session has work left", |session, _| {
+        process(store, config, session)
+    })
+}
+
+/// What `kute summarize --all` does for this session, if anything: the conversations
+/// transcribed and never summarized for want of a summarizer, or failed at it. The
+/// skipped ones are reset first; then one summarize job runs, which summarizes every
+/// conversation waiting for a summary, each once. Its conversation is `None` when none of
+/// the session's transcribed conversations has a summary, so it redoes the session's too.
+fn missing_summaries(meta: &Meta) -> Option<Backfill> {
+    if meta.state == SessionState::Recording {
+        return None;
+    }
+    let transcribed: Vec<_> = meta
+        .conversations
+        .iter()
+        .filter(|c| !c.needs_transcription())
+        .collect();
+    // Sessions from before `skip_reason` don't say why; the pipeline skips the too short
+    // ones again.
+    let skipped: Vec<u32> = transcribed
+        .iter()
+        .filter(|c| {
+            c.stage == Stage::Skipped
+                && matches!(c.skip_reason, None | Some(SkipReason::NoSummarizer))
+        })
+        .map(|c| c.n)
+        .collect();
+    let missing: Vec<u32> = transcribed
+        .iter()
+        .filter(|c| c.needs_summary() || skipped.contains(&c.n))
+        .map(|c| c.n)
+        .collect();
+    let first = *missing.first()?;
+    if missing.len() == transcribed.len() {
+        // The job resets them all itself.
+        return Some(Backfill {
+            reset: Vec::new(),
+            conversation: None,
+        });
+    }
+    Some(Backfill {
+        reset: skipped,
+        conversation: Some(first),
+    })
+}
+
+#[derive(Debug, PartialEq)]
+struct Backfill {
+    /// Skipped conversations to mark as waiting for a summary before the job runs.
+    reset: Vec<u32>,
+    conversation: Option<u32>,
+}
+
+fn summarize_all(store: &Store, config: &Config, backend: Option<SummaryBackend>) -> Result<()> {
+    if backend.unwrap_or(config.summary.backend) == SummaryBackend::None {
+        bail!(
+            "no summarizer is configured (summary.backend = \"none\"); set one in the config or pass --backend"
+        );
+    }
+    let picked = sessions_with_meta(store)?
+        .into_iter()
+        .filter(|(_, meta)| missing_summaries(meta).is_some())
+        .collect();
+    for_each_session(
+        picked,
+        "every conversation has a summary",
+        |session, meta| {
+            let Some(backfill) = missing_summaries(meta) else {
+                return Ok(());
+            };
+            if !backfill.reset.is_empty() {
+                session.update_meta(|m| {
+                    for c in &mut m.conversations {
+                        if backfill.reset.contains(&c.n) {
+                            c.stage = Stage::Transcribed;
+                            c.clear_error();
+                        }
+                    }
+                })?;
+            }
+            run_job(
+                store,
+                config,
+                &Job::Summarize {
+                    id: session.id.clone(),
+                    conversation: backfill.conversation,
+                    lang: None,
+                    backend,
+                },
+            )
+        },
+    )
+}
+
 fn list(store: &Store, since: Option<&str>) -> Result<()> {
     let cutoff = match since {
         Some(s) => {
@@ -930,6 +1100,117 @@ mod tests {
         assert_eq!(doc["session"], "2026-10-08T090000");
         status.phase = Phase::Idle;
         assert_eq!(status_document(Some(&status))["recording"], false);
+    }
+
+    fn meta(state: SessionState, stages: &[Stage]) -> Meta {
+        use crate::store::{Conversation, Trigger, TriggerKind};
+        let mut meta = Meta::new(
+            "2026-10-19T100000".into(),
+            "2026-10-19T10:00:00+02:00[+02:00]".parse().unwrap(),
+            Trigger {
+                kind: TriggerKind::Import,
+                app_name: None,
+                binary: None,
+            },
+            "auto".into(),
+        );
+        meta.state = state;
+        for (i, stage) in stages.iter().enumerate() {
+            let mut c = Conversation::new(i as u32 + 1, 0, 5_000);
+            c.stage = *stage;
+            if *stage == Stage::Skipped {
+                c.skip_reason = Some(SkipReason::NoSummarizer);
+            }
+            meta.conversations.push(c);
+        }
+        meta
+    }
+
+    #[test]
+    fn process_all_picks_sessions_with_work_left() {
+        use Stage::*;
+        assert!(needs_processing(&meta(SessionState::Processing, &[])));
+        assert!(needs_processing(&meta(
+            SessionState::Done,
+            &[Summarized, Transcribed]
+        )));
+        assert!(!needs_processing(&meta(
+            SessionState::Done,
+            &[Summarized, Skipped]
+        )));
+        // The daemon is still on it.
+        assert!(!needs_processing(&meta(
+            SessionState::Recording,
+            &[Pending]
+        )));
+    }
+
+    #[test]
+    fn summarize_all_picks_conversations_without_a_summary() {
+        use Stage::*;
+        assert_eq!(
+            missing_summaries(&meta(SessionState::Done, &[Summarized])),
+            None
+        );
+        let all = Backfill {
+            reset: vec![],
+            conversation: None,
+        };
+        let some = |reset: Vec<u32>, n| Backfill {
+            reset,
+            conversation: Some(n),
+        };
+        // All of them: the job redoes the whole session.
+        assert_eq!(
+            missing_summaries(&meta(SessionState::Done, &[Skipped, Skipped, Pending])),
+            Some(all)
+        );
+        // Only some: the summaries already written stay. The skipped ones are reset, then
+        // one job summarizes every waiting conversation once.
+        assert_eq!(
+            missing_summaries(&meta(
+                SessionState::Done,
+                &[Summarized, Skipped, Transcribed, Skipped]
+            )),
+            Some(some(vec![2, 4], 2))
+        );
+        assert_eq!(
+            missing_summaries(&meta(
+                SessionState::Done,
+                &[Summarized, Transcribed, Transcribed]
+            )),
+            Some(some(vec![], 2))
+        );
+        let mut short = meta(SessionState::Done, &[Skipped]);
+        short.conversations[0].skip_reason = Some(SkipReason::TooShort {
+            words: 3,
+            min_words: 50,
+        });
+        assert_eq!(missing_summaries(&short), None);
+        // Skipped before kute recorded why: maybe for want of a summarizer.
+        short.conversations[0].skip_reason = None;
+        assert_eq!(
+            missing_summaries(&short),
+            Some(Backfill {
+                reset: vec![],
+                conversation: None
+            })
+        );
+        assert_eq!(
+            missing_summaries(&meta(SessionState::Recording, &[Skipped])),
+            None
+        );
+    }
+
+    #[test]
+    fn all_replaces_the_session_id() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["kute"], args].concat());
+        assert!(parse(&["summarize", "--all"]).is_ok());
+        assert!(parse(&["process", "--all"]).is_ok());
+        assert!(parse(&["summarize"]).is_err());
+        assert!(parse(&["process"]).is_err());
+        assert!(parse(&["summarize", "x", "--all"]).is_err());
+        assert!(parse(&["summarize", "--all", "--lang", "it"]).is_err());
     }
 
     fn updates(tty: bool, total: u64, step: u64) -> Vec<String> {

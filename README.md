@@ -144,6 +144,10 @@ kute notes last --clear
 kute summarize last         # summarize again with them
 ```
 
+To summarize the calls recorded before a summarizer was set up, or after one failed, run
+`kute summarize --all`: it summarizes every conversation that has no summary yet. `kute process
+--all` likewise finishes every session with work left.
+
 Name the others, and the transcript labels their track with the name instead of "Others" (and
 the summary prompt says who that is):
 

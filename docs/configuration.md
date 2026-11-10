@@ -91,7 +91,8 @@ picks its own device.
 ## `[summary]`
 
 Summaries are off until you pick a backend. kute summarizes each conversation separately and
-writes them to the session's `summary.md`.
+writes them to the session's `summary.md`. Calls recorded before you set one up keep their
+transcripts: `kute summarize --all` then summarizes every conversation that has no summary yet.
 
 | Key | Default | |
 |---|---|---|
