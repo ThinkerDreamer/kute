@@ -5,6 +5,18 @@ All notable changes to kute are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
 breaking change bumps the minor version and a fix bumps the patch version.
 
+## [0.5.0] - 2026-11-12
+
+### Added
+
+- **cli:** Add --all to summarize and process
+- **cli:** Add kute delete
+
+### Fixed
+
+- **tray:** Don't let an old hicolor icon cache hide the icons
+- **tray:** Move the hicolor folder past the cache's second
+
 ## [0.4.1] - 2026-11-09
 
 ### Fixed
@@ -143,6 +155,7 @@ breaking change bumps the minor version and a fix bumps the patch version.
 
 - Install, configuration, privacy, troubleshooting and contributing guides ([#1](https://github.com/ThinkerDreamer/kute/pull/1))
 
+[0.5.0]: https://github.com/ThinkerDreamer/kute/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ThinkerDreamer/kute/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ThinkerDreamer/kute/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ThinkerDreamer/kute/compare/v0.2.0...v0.3.0
