@@ -25,77 +25,32 @@ pub trait AsrProvider {
     fn release(&mut self);
 }
 
-pub struct WhisperProvider {
-    model_path: PathBuf,
-    model_name: String,
+/// Silero for VAD plus a transcriber, loaded on first use and dropped on `release`, so a
+/// model (or a helper program) only holds memory while kute transcribes.
+struct LazyProvider<T> {
     vad_path: PathBuf,
-    gpu: bool,
-    loaded: Option<(SileroVad, WhisperTranscriber)>,
+    load: Box<dyn Fn() -> Result<T>>,
+    loaded: Option<(SileroVad, T)>,
 }
 
-impl WhisperProvider {
-    /// Checks that the configured model files exist; loading waits until first use.
-    pub fn new(config: &Config, store: &Store) -> Result<WhisperProvider> {
-        let (model_path, model_name) =
-            models::resolve_whisper(&store.models_dir(), &config.transcribe.model)?;
-        let vad_path = models::resolve_vad(&store.models_dir())?;
-        let device = gpu::device();
-        if let Some(note) = gpu::integrated_note(config.transcribe.gpu, device.as_ref()) {
-            eprintln!("kute: {note}");
-        }
-        Ok(WhisperProvider {
-            model_path,
-            model_name,
-            vad_path,
-            gpu: gpu::use_gpu(config.transcribe.gpu, device.as_ref()),
-            loaded: None,
-        })
-    }
-}
-
-impl AsrProvider for WhisperProvider {
-    fn get(&mut self) -> Result<(&mut dyn SpeechDetector, &mut dyn Transcriber)> {
-        if self.loaded.is_none() {
-            let vad = SileroVad::load(&self.vad_path)?;
-            let asr = WhisperTranscriber::load(&self.model_path, &self.model_name, self.gpu)?;
-            self.loaded = Some((vad, asr));
-        }
-        let (vad, asr) = self.loaded.as_mut().expect("loaded above");
-        Ok((vad as &mut dyn SpeechDetector, asr as &mut dyn Transcriber))
-    }
-
-    fn release(&mut self) {
-        self.loaded = None;
-    }
-}
-
-/// Runs a helper program (`transcribe.backend = "command"`), with Silero for VAD. The program
-/// is started on first use and stopped on `release`, so its model is only loaded while
-/// kute transcribes.
-pub struct CommandProvider {
-    argv: Vec<String>,
-    vad_path: PathBuf,
-    loaded: Option<(SileroVad, CommandTranscriber)>,
-}
-
-impl CommandProvider {
-    pub fn new(config: &Config, store: &Store) -> Result<CommandProvider> {
-        if config.transcribe.command.is_empty() {
-            bail!("transcribe.backend = \"command\" needs transcribe.command");
-        }
-        Ok(CommandProvider {
-            argv: config.transcribe.command.clone(),
+impl<T: Transcriber + 'static> LazyProvider<T> {
+    fn boxed(
+        store: &Store,
+        load: impl Fn() -> Result<T> + 'static,
+    ) -> Result<Box<dyn AsrProvider>> {
+        Ok(Box::new(LazyProvider {
             vad_path: models::resolve_vad(&store.models_dir())?,
+            load: Box::new(load),
             loaded: None,
-        })
+        }))
     }
 }
 
-impl AsrProvider for CommandProvider {
+impl<T: Transcriber> AsrProvider for LazyProvider<T> {
     fn get(&mut self) -> Result<(&mut dyn SpeechDetector, &mut dyn Transcriber)> {
         if self.loaded.is_none() {
             let vad = SileroVad::load(&self.vad_path)?;
-            let asr = CommandTranscriber::start(&self.argv)?;
+            let asr = (self.load)()?;
             self.loaded = Some((vad, asr));
         }
         let (vad, asr) = self.loaded.as_mut().expect("loaded above");
@@ -110,10 +65,28 @@ impl AsrProvider for CommandProvider {
 /// The configured transcription backend. Checks what can be checked up front (model files);
 /// models load on first use.
 pub fn asr_provider(config: &Config, store: &Store) -> Result<Box<dyn AsrProvider>> {
-    Ok(match config.transcribe.backend {
-        TranscribeBackend::Whisper => Box::new(WhisperProvider::new(config, store)?),
-        TranscribeBackend::Command => Box::new(CommandProvider::new(config, store)?),
-    })
+    match config.transcribe.backend {
+        TranscribeBackend::Whisper => {
+            let (model_path, model_name) =
+                models::resolve_whisper(&store.models_dir(), &config.transcribe.model)?;
+            let device = gpu::device();
+            if let Some(note) = gpu::integrated_note(config.transcribe.gpu, device.as_ref()) {
+                eprintln!("kute: {note}");
+            }
+            let gpu = gpu::use_gpu(config.transcribe.gpu, device.as_ref());
+            LazyProvider::boxed(store, move || {
+                WhisperTranscriber::load(&model_path, &model_name, gpu)
+            })
+        }
+        // A helper program (`transcribe.backend = "command"`), started on first use.
+        TranscribeBackend::Command => {
+            if config.transcribe.command.is_empty() {
+                bail!("transcribe.backend = \"command\" needs transcribe.command");
+            }
+            let argv = config.transcribe.command.clone();
+            LazyProvider::boxed(store, move || CommandTranscriber::start(&argv))
+        }
+    }
 }
 
 #[derive(Debug, Default)]
