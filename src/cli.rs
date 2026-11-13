@@ -764,7 +764,7 @@ fn queue_on_daemon(store: &Store, config: &Config, job: &Job) -> Result<bool> {
     let Some(message) = daemon.queue(job)? else {
         return Ok(false);
     };
-    // Until there are notifications, failures only show up in the daemon's log.
+    // Failures show up as a notification and in the daemon's log, not here.
     println!(
         "{message}; the daemon logs the result (journalctl --user -u kute, or the \
          terminal running kute daemon)"
@@ -839,10 +839,10 @@ fn sessions_with_meta(store: &Store) -> Result<Vec<(Session, Meta)>> {
 }
 
 /// Runs `each` on every session it picks; a failure is printed and the rest still run.
-fn for_each_session(
-    picked: Vec<(Session, Meta)>,
+fn for_each_session<T>(
+    picked: Vec<(Session, T)>,
     nothing: &str,
-    mut each: impl FnMut(&Session, &Meta) -> Result<()>,
+    mut each: impl FnMut(&Session, &T) -> Result<()>,
 ) -> Result<()> {
     if picked.is_empty() {
         println!("{nothing}");
@@ -997,36 +997,22 @@ fn delete(store: &Store, config: &Config, ids: &[String], yes: bool) -> Result<(
         }
     }
     let daemon = DaemonClient::connect(store.root(), config.source.as_deref())?;
-    let total = sessions.len();
-    let mut failed = 0;
-    for session in sessions {
-        let id = session.id.clone();
+    let picked = sessions.into_iter().map(|s| (s, ())).collect();
+    for_each_session(picked, "nothing to delete", |session, ()| {
         // `None`: no daemon, or it stopped meanwhile.
-        let deleted = match &daemon {
-            Some(daemon) => daemon.delete(&id).map(|reply| reply.is_some()),
-            None => Ok(false),
+        let on_daemon = match &daemon {
+            Some(daemon) => daemon.delete(&session.id)?.is_some(),
+            None => false,
         };
         // The search rows go first: if that fails, the session is still whole, and
         // `kute delete` can be run again.
-        let deleted = deleted.and_then(|deleted| {
-            if !deleted {
-                pipeline::open_index(store)?.delete_session(&id)?;
-                session.delete()?;
-            }
-            Ok(())
-        });
-        match deleted {
-            Ok(()) => println!("deleted {id}"),
-            Err(e) => {
-                eprintln!("kute: {id}: {e:#}");
-                failed += 1;
-            }
+        if !on_daemon {
+            pipeline::open_index(store)?.delete_session(&session.id)?;
+            session.clone().delete()?;
         }
-    }
-    if failed > 0 {
-        bail!("{failed} of {total} session(s) could not be deleted");
-    }
-    Ok(())
+        println!("deleted {}", session.id);
+        Ok(())
+    })
 }
 
 fn list(store: &Store, since: Option<&str>) -> Result<()> {
