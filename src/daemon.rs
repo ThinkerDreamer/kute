@@ -340,11 +340,9 @@ impl Daemon {
                 if self.live.as_ref().is_some_and(|l| l.id() == id) {
                     bail!("{id} is still recording; `kute discard` stops and deletes it");
                 }
-                // Forgotten even when only part of the folder went: its jobs would only
-                // fail on what is left.
-                let deleted = session.delete();
+                // A failed delete leaves the session whole, jobs and all.
+                session.delete()?;
                 self.forget(&id, true);
-                deleted?;
                 eprintln!("kute: deleted {id}");
                 format!("deleted {id}")
             }

@@ -43,12 +43,15 @@ pub struct Store {
 
 impl Store {
     /// Opens (creating if needed) the storage root. Root, `sessions/` and `models/` are 0700.
+    /// Also finishes removing sessions whose delete only got partway (see `Session::delete`).
     pub fn open(root: impl Into<PathBuf>) -> Result<Store> {
         let root = root.into();
         create_private_dir(&root)?;
         create_private_dir(&root.join("sessions"))?;
         create_private_dir(&root.join("models"))?;
-        Ok(Store { root })
+        let store = Store { root };
+        store.empty_trash();
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -65,6 +68,29 @@ impl Store {
 
     pub fn index_path(&self) -> PathBuf {
         self.root.join("index.sqlite")
+    }
+
+    /// Removes what is left of deleted sessions. A failure is only logged: the next
+    /// `Store::open` tries again.
+    fn empty_trash(&self) {
+        let trash = trash_dir(&self.sessions_dir());
+        let entries = match fs::read_dir(&trash) {
+            Ok(entries) => entries,
+            // Nothing was ever deleted.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                eprintln!("kute: reading {}: {e}", trash.display());
+                return;
+            }
+        };
+        for entry in entries {
+            let removed = entry
+                .with_context(|| format!("reading {}", trash.display()))
+                .and_then(|entry| remove_all(&entry.path()));
+            if let Err(e) = removed {
+                eprintln!("kute: {e:#}");
+            }
+        }
     }
 
     /// Creates an empty session folder named after `started_at`, adding `-2`, `-3`, ...
@@ -175,9 +201,34 @@ impl Session {
         Ok(meta)
     }
 
-    /// Removes the session folder and everything in it.
+    /// Deletes the session folder and everything in it.
+    ///
+    /// The folder first moves to `trash/` next to `sessions/`, in one rename, so the session
+    /// is gone at once or not at all: an error means it is still whole. Removing the moved
+    /// folder can still stop partway (a file that can't be removed); that is only logged,
+    /// and `Store::open` finishes the job later. Before, a half-removed folder could lose
+    /// its `meta.toml` and with it every way to find and delete the audio left in it.
     pub fn delete(self) -> Result<()> {
-        fs::remove_dir_all(&self.dir).with_context(|| format!("removing {}", self.dir.display()))
+        let sessions = self.dir.parent().context("a session folder has a parent")?;
+        let trash = trash_dir(sessions);
+        create_private_dir(&trash)?;
+        let mut moved = trash.join(&self.id);
+        for i in 2u32.. {
+            match fs::rename(&self.dir, &moved) {
+                Ok(()) => break,
+                // A folder left from an earlier delete of the same id.
+                Err(e) if moved.exists() && e.kind() != std::io::ErrorKind::NotFound => {
+                    moved = trash.join(format!("{}-{i}", self.id));
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("removing {}", self.dir.display()));
+                }
+            }
+        }
+        if let Err(e) = remove_all(&moved) {
+            eprintln!("kute: {e:#}; kute tries again the next time it starts");
+        }
+        Ok(())
     }
 
     pub fn wav_path(&self, track: Track) -> PathBuf {
@@ -241,6 +292,21 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         f.sync_all()?;
     }
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))
+}
+
+/// Where `Session::delete` moves a session folder before removing it: `trash/` beside
+/// `sessions/`, on the same file system, so the move is a rename.
+fn trash_dir(sessions: &Path) -> PathBuf {
+    sessions.with_file_name("trash")
+}
+
+/// `fs::remove_dir_all`, where a folder that someone else removed meanwhile (a daemon and a
+/// CLI emptying the trash at once) counts as removed.
+fn remove_all(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(_) if !path.exists() => Ok(()),
+        removed => removed.with_context(|| format!("removing {}", path.display())),
+    }
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {
@@ -435,5 +501,34 @@ mod tests {
         assert!(dir.is_dir());
         session.delete().unwrap();
         assert!(!dir.exists());
+        assert_eq!(
+            fs::read_dir(dir.parent().unwrap().with_file_name("trash"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn delete_steps_around_what_an_earlier_delete_left() {
+        let (_tmp, store) = store();
+        let session = create_with_meta(&store, "2026-10-19T10:00:00+02:00[+02:00]");
+        let left = store.root().join("trash").join(&session.id);
+        fs::create_dir_all(left.join("stuck")).unwrap();
+        fs::write(left.join("stuck/me.wav"), b"audio").unwrap();
+        let dir = session.dir.clone();
+        session.delete().unwrap();
+        assert!(!dir.exists());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_finishes_a_delete_that_stopped_partway() {
+        let (_tmp, store) = store();
+        let left = store.root().join("trash").join("2026-10-19T100000");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("me.wav"), b"audio").unwrap();
+        Store::open(store.root()).unwrap();
+        assert!(!left.exists());
     }
 }

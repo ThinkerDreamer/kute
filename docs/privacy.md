@@ -47,6 +47,7 @@ sessions/<start time>/
   summaries/NN.md    one summary per conversation, combined into summary.md
 index.sqlite         the search index, rebuilt from the session folders
 models/              downloaded models
+trash/               deleted sessions on their way out; normally empty
 ```
 
 The tray icons are written to `~/.local/share/kute/icons` and
@@ -60,6 +61,8 @@ While a call is being recorded and processed, the audio is kept as WAV and compr
 - During a call, `kute discard` stops recording and deletes the session.
 - Afterwards, `kute delete <id>` deletes the session's folder and its search entries. It asks
   first; `--yes` skips the question.
+- A deleted session's folder first moves to `trash/`, then is removed. If a file there can't
+  be removed, kute says so and tries again the next time it runs.
 
 ## Keeping kute out of a call
 

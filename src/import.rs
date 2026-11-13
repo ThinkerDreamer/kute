@@ -27,7 +27,9 @@ pub fn import(store: &Store, config: &Config, req: &ImportRequest) -> Result<Ses
     match fill_session(&session, config, req, started_at) {
         Ok(()) => Ok(session),
         Err(e) => {
-            let _ = fs::remove_dir_all(&session.dir);
+            if let Err(e) = session.delete() {
+                eprintln!("kute: {e:#}");
+            }
             Err(e)
         }
     }

@@ -117,6 +117,7 @@ mode 0700, since it holds recordings of other people.
 │       ├── summaries/01.md 02.md   ← one per summarized conversation
 │       └── summary.md              ← derived: concatenation of summaries/
 ├── models/                         ← Whisper and Silero VAD model files
+├── trash/                          ← deleted sessions while they are removed
 └── index.sqlite                    ← derived, rebuildable with `kute reindex`
 ```
 
