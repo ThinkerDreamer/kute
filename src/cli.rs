@@ -708,7 +708,12 @@ fn control(request: Request) -> Result<()> {
 /// Prints the daemon's status as one line of JSON. No daemon is not an error here: a script
 /// asking whether it may restart kute wants an answer either way.
 fn status_json() -> Result<()> {
-    let status = match ipc::request(&ipc::socket_path()?, &Request::Status)? {
+    // Without a runtime dir there is no socket, so no daemon.
+    let reply = match ipc::socket_path() {
+        Ok(path) => ipc::request(&path, &Request::Status)?,
+        Err(_) => None,
+    };
+    let status = match reply {
         None => None,
         Some(Response::Status { status }) => Some(status),
         Some(Response::Error { message }) => bail!("{message}"),
