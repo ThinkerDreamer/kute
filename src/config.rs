@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -74,6 +75,9 @@ pub struct TranscribeConfig {
     pub language: String,
     /// Transcribe on the GPU. Unset: only on a discrete GPU (see `gpu::use_gpu`).
     pub gpu: Option<bool>,
+    /// `whisper` backend: CPU threads. Unset: one per physical core (see
+    /// `transcribe::whisper::threads`).
+    pub threads: Option<NonZeroUsize>,
 }
 
 impl Default for TranscribeConfig {
@@ -84,9 +88,13 @@ impl Default for TranscribeConfig {
             model: "large-v3-turbo".into(),
             language: "auto".into(),
             gpu: None,
+            threads: None,
         }
     }
 }
+
+/// The most `transcribe.threads` accepts; whisper.cpp takes the count as an `i32`.
+const MAX_THREADS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -244,6 +252,11 @@ impl Config {
         let config: Config = toml::from_str(text)?;
         crate::transcribe::parse_languages(&config.transcribe.language)
             .context("transcribe.language")?;
+        if let Some(n) = config.transcribe.threads
+            && n.get() > MAX_THREADS
+        {
+            bail!("transcribe.threads = {n} is more than {MAX_THREADS}");
+        }
         if config.transcribe.backend == TranscribeBackend::Command
             && config.transcribe.command.is_empty()
         {
@@ -294,6 +307,13 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_transcribe_threads_is_an_error() {
+        assert!(Config::parse("[transcribe]\nthreads = 0").is_err());
+        assert!(Config::parse("[transcribe]\nthreads = 4294967296").is_err());
+        assert!(Config::parse("[transcribe]\nthreads = 1024").is_ok());
+    }
+
+    #[test]
     fn full_example_parses() {
         let c = Config::parse(
             r#"
@@ -308,6 +328,7 @@ mod tests {
             model = "small"
             language = "it"
             gpu = false
+            threads = 6
             [summary]
             backend = "command"
             command = ["claude", "-p"]
@@ -321,6 +342,7 @@ mod tests {
         assert_eq!(c.labels.others, "Team");
         assert_eq!(c.transcribe.model, "small");
         assert_eq!(c.transcribe.gpu, Some(false));
+        assert_eq!(c.transcribe.threads, NonZeroUsize::new(6));
         assert_eq!(c.summary.backend, SummaryBackend::Command);
         assert_eq!(c.summary.command, vec!["claude", "-p"]);
         assert_eq!(c.summary.timeout, jiff::SignedDuration::from_secs(120));

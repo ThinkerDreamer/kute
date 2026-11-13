@@ -13,7 +13,7 @@ use crate::store::{
 };
 use crate::summarize::{PromptContext, Summarizer, build_prompt};
 use crate::transcribe::command::CommandTranscriber;
-use crate::transcribe::whisper::{SileroVad, WhisperTranscriber};
+use crate::transcribe::whisper::{self, SileroVad, WhisperTranscriber};
 use crate::transcribe::{SpeechDetector, Transcriber, session_languages, transcribe_track};
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
@@ -74,8 +74,9 @@ pub fn asr_provider(config: &Config, store: &Store) -> Result<Box<dyn AsrProvide
                 eprintln!("kute: {note}");
             }
             let gpu = gpu::use_gpu(config.transcribe.gpu, device.as_ref());
+            let threads = whisper::threads(config.transcribe.threads);
             LazyProvider::boxed(store, move || {
-                WhisperTranscriber::load(&model_path, &model_name, gpu)
+                WhisperTranscriber::load(&model_path, &model_name, gpu, threads)
             })
         }
         // A helper program (`transcribe.backend = "command"`), started on first use.

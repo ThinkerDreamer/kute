@@ -65,6 +65,7 @@ kute always records the default output's monitor as the "Others" track.
 | `model` | `"large-v3-turbo"` | `whisper` backend: a name from `kute model list`, or a path to a ggml `.bin` file. |
 | `language` | `"auto"` | `"auto"` detects the language of each speech chunk, so mixed-language calls work. Set a code such as `"it"` to force one, or several such as `"ru,en"` to detect only among those. A session's own setting (`kute language`, for both tracks or one) wins. |
 | `gpu` | unset | `whisper` backend: unset, kute transcribes on a discrete GPU and on the CPU when the only GPU is integrated, which is often slower than a desktop CPU. `true` or `false` forces the GPU or the CPU. `kute doctor --bench` measures which is faster and can set it. |
+| `threads` | unset | `whisper` backend: CPU threads. Unset, one per physical core. Set a lower number to leave cores free while kute transcribes; more threads than cores is much slower. |
 
 Every backend uses kute's own speech detection (Silero VAD) to cut the audio into chunks, so
 the VAD model is needed either way.
@@ -85,7 +86,7 @@ command = ["~/kute-qwen/.venv/bin/python", "~/kute-qwen/kute-qwen3-asr.py"]
 
 `language` and `kute language` work as with Whisper. A helper that can't limit detection to a
 list, as Qwen3-ASR can't, chooses among the candidates itself (see its README).
-`kute retranscribe --model`, `gpu` and `kute doctor --bench` only apply to Whisper; the helper
+`kute retranscribe --model`, `gpu`, `threads` and `kute doctor --bench` only apply to Whisper; the helper
 picks its own device.
 
 ## `[summary]`

@@ -69,6 +69,8 @@ speakers, the "Me" track contains both and the transcript will repeat lines.
   and offers to set `transcribe.gpu` to the faster one (`--save` sets it without asking,
   `--sample FILE` times your own recording). An integrated GPU can be slower than a fast CPU.
   Restart the daemon afterwards.
+- On the CPU, kute uses one thread per physical core. If `transcribe.threads` is set, check
+  that it isn't lower than you meant, or higher than the number of cores.
 - Try a smaller model, e.g. `large-v3-turbo-q5_0` or `small`.
 
 ## Transcription failed

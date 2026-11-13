@@ -5,6 +5,8 @@
 use super::{RawSegment, Span, SpeechDetector, Transcriber};
 use crate::store::Word;
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
@@ -53,22 +55,92 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
-    pub fn load(path: &Path, name: &str, use_gpu: bool) -> Result<WhisperTranscriber> {
+    /// Loads the model to run on `threads` CPU threads (see [`threads`]).
+    pub fn load(
+        path: &Path,
+        name: &str,
+        use_gpu: bool,
+        threads: usize,
+    ) -> Result<WhisperTranscriber> {
         let mut params = WhisperContextParameters::default();
         params.use_gpu(use_gpu);
         let path = path.to_str().context("model path is not valid UTF-8")?;
         let ctx = WhisperContext::new_with_params(path, params)
             .map_err(|e| anyhow!("loading Whisper model {path}: {e}"))?;
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(8);
         Ok(WhisperTranscriber {
             ctx,
             name: name.to_string(),
             threads,
         })
     }
+}
+
+/// How many CPU threads whisper.cpp gets: `transcribe.threads` when set, else one per
+/// physical core this process may run on. ggml's threads wait for each other by spinning, so
+/// a thread that has to share a core slows them all down; SMT siblings are left out for that
+/// reason.
+pub fn threads(setting: Option<NonZeroUsize>) -> usize {
+    if let Some(n) = setting {
+        return n.get();
+    }
+    let logical = std::thread::available_parallelism().map_or(4, NonZeroUsize::get);
+    // The calling thread's mask, as available_parallelism reads it.
+    let allowed = std::fs::read_to_string("/proc/thread-self/status")
+        .or_else(|_| std::fs::read_to_string("/proc/self/status"))
+        .ok()
+        .and_then(|status| allowed_cpus(&status));
+    match physical_cores(Path::new("/sys/devices/system/cpu"), allowed.as_ref()) {
+        Some(cores) => cores.min(logical),
+        None => logical,
+    }
+}
+
+/// The CPUs a thread may run on, from a `/proc/.../status` file's `Cpus_allowed_list`
+/// (`0-3,8,10-11`). `None` when the line is missing or unreadable.
+fn allowed_cpus(status: &str) -> Option<HashSet<usize>> {
+    let list = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))?
+        .trim();
+    let mut cpus = HashSet::new();
+    for part in list.split(',').filter(|p| !p.is_empty()) {
+        let (first, last) = part.split_once('-').unwrap_or((part, part));
+        let (first, last): (usize, usize) = (first.parse().ok()?, last.parse().ok()?);
+        cpus.extend(first..=last);
+    }
+    (!cpus.is_empty()).then_some(cpus)
+}
+
+/// Counts the physical cores under a sysfs CPU directory among the `allowed` CPUs (all when
+/// `None`): online CPUs that list the same `thread_siblings_list` share a core, so two
+/// allowed siblings count once. `None` when there is no topology to read, or an allowed CPU has
+/// none.
+fn physical_cores(sysfs: &Path, allowed: Option<&HashSet<usize>>) -> Option<usize> {
+    let mut cores = HashSet::new();
+    for entry in std::fs::read_dir(sysfs).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("cpu"))
+            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|id| id.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if allowed.is_some_and(|a| !a.contains(&id)) {
+            continue;
+        }
+        match std::fs::read_to_string(entry.path().join("topology/thread_siblings_list")) {
+            Ok(siblings) => {
+                cores.insert(siblings.trim().to_string());
+            }
+            // An allowed CPU with no topology would make the count too low: give up.
+            Err(_) if allowed.is_some() => return None,
+            // Without a mask, skip offline CPUs (they have no topology).
+            Err(_) => {}
+        }
+    }
+    (!cores.is_empty()).then_some(cores.len())
 }
 
 impl Transcriber for WhisperTranscriber {
@@ -210,6 +282,74 @@ pub fn tokens_to_words(tokens: &[TokenPiece]) -> Vec<Word> {
 mod tests {
     use super::*;
 
+    fn fake_sysfs(cpus: &[(&str, Option<&str>)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, siblings) in cpus {
+            let topology = dir.path().join(name).join("topology");
+            std::fs::create_dir_all(&topology).unwrap();
+            if let Some(list) = siblings {
+                std::fs::write(topology.join("thread_siblings_list"), format!("{list}\n")).unwrap();
+            }
+        }
+        dir
+    }
+
+    #[test]
+    fn physical_cores_counts_smt_siblings_once() {
+        let sysfs = fake_sysfs(&[
+            ("cpu0", Some("0,2")),
+            ("cpu1", Some("1,3")),
+            ("cpu2", Some("0,2")),
+            ("cpu3", Some("1,3")),
+            ("cpu4", None), // offline: no topology
+            ("cpufreq", Some("0")),
+            ("cpuidle", None),
+        ]);
+        assert_eq!(physical_cores(sysfs.path(), None), Some(2));
+        let both_siblings = HashSet::from([0, 2]);
+        assert_eq!(physical_cores(sysfs.path(), Some(&both_siblings)), Some(1));
+        let one_each = HashSet::from([0, 1]);
+        assert_eq!(physical_cores(sysfs.path(), Some(&one_each)), Some(2));
+        let with_offline = HashSet::from([0, 4]);
+        assert_eq!(physical_cores(sysfs.path(), Some(&with_offline)), None);
+    }
+
+    #[test]
+    fn physical_cores_without_smt_is_one_per_cpu() {
+        let sysfs = fake_sysfs(&[
+            ("cpu0", Some("0")),
+            ("cpu1", Some("1")),
+            ("cpu2", Some("2")),
+        ]);
+        assert_eq!(physical_cores(sysfs.path(), None), Some(3));
+    }
+
+    #[test]
+    fn physical_cores_is_none_without_topology() {
+        assert_eq!(
+            physical_cores(fake_sysfs(&[("cpu0", None)]).path(), None),
+            None
+        );
+        assert_eq!(physical_cores(Path::new("/nonexistent"), None), None);
+    }
+
+    #[test]
+    fn allowed_cpus_parses_ranges() {
+        let status = "Name:\tkute\nCpus_allowed:\tf0f\nCpus_allowed_list:\t0-3,8,10-11\n";
+        assert_eq!(
+            allowed_cpus(status),
+            Some(HashSet::from([0, 1, 2, 3, 8, 10, 11]))
+        );
+        assert_eq!(allowed_cpus("Name:\tkute\n"), None);
+        assert_eq!(allowed_cpus("Cpus_allowed_list:\tx-1\n"), None);
+    }
+
+    #[test]
+    fn threads_setting_wins() {
+        assert_eq!(threads(NonZeroUsize::new(3)), 3);
+        assert!(threads(None) >= 1);
+    }
+
     fn piece(bytes: &[u8], t0: i64, t1: i64) -> TokenPiece {
         TokenPiece {
             bytes: bytes.to_vec(),
@@ -305,7 +445,8 @@ mod tests {
         let regions = vad.speech_regions(&samples).unwrap();
         assert!(!regions.is_empty());
         assert!(regions[0].start_ms < 1_000, "{regions:?}");
-        let mut asr = WhisperTranscriber::load(&dir.join("ggml-tiny.bin"), "tiny", false).unwrap();
+        let mut asr =
+            WhisperTranscriber::load(&dir.join("ggml-tiny.bin"), "tiny", false, 4).unwrap();
         assert_eq!(asr.detect_language(&samples, &[]).unwrap(), "en");
         let among = ["it".to_string(), "en".to_string()];
         assert_eq!(asr.detect_language(&samples, &among).unwrap(), "en");

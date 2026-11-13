@@ -11,7 +11,7 @@ use crate::ipc::{self, Request, Response};
 use crate::models;
 use crate::store::write_atomic;
 use crate::transcribe::Transcriber;
-use crate::transcribe::whisper::WhisperTranscriber;
+use crate::transcribe::whisper::{self, WhisperTranscriber};
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -69,16 +69,26 @@ pub fn run(opts: Options) -> Result<()> {
         );
         return Ok(());
     };
+    let threads = whisper::threads(config.transcribe.threads);
     let gpu_label = format!("GPU ({backend}, {})", device.name);
     let gpu = time_device(
         &gpu_label,
         &model_path,
         &model_name,
         true,
+        threads,
         &samples,
         language,
     )?;
-    let cpu = time_device("CPU", &model_path, &model_name, false, &samples, language)?;
+    let cpu = time_device(
+        &format!("CPU ({threads} threads)"),
+        &model_path,
+        &model_name,
+        false,
+        threads,
+        &samples,
+        language,
+    )?;
 
     let use_gpu = pick_gpu(gpu, cpu);
     let ratio = gpu.as_secs_f64() / cpu.as_secs_f64();
@@ -173,13 +183,14 @@ fn time_device(
     model_path: &Path,
     model_name: &str,
     use_gpu: bool,
+    threads: usize,
     samples: &[f32],
     language: &str,
 ) -> Result<Duration> {
     print!("{label}: loading");
     std::io::stdout().flush().ok();
     let started = Instant::now();
-    let mut asr = WhisperTranscriber::load(model_path, model_name, use_gpu)?;
+    let mut asr = WhisperTranscriber::load(model_path, model_name, use_gpu, threads)?;
     print!(" ({:.1} s), warming up", started.elapsed().as_secs_f64());
     std::io::stdout().flush().ok();
     asr.transcribe(samples, language)?;
