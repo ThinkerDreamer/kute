@@ -5,6 +5,17 @@ All notable changes to kute are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a new feature or a
 breaking change bumps the minor version and a fix bumps the patch version.
 
+## [0.6.0] - 2026-11-17
+
+### Added
+
+- **transcribe:** One CPU thread per physical core
+
+### Fixed
+
+- **store:** Delete a session in one step, and finish a delete that stopped
+- **cli:** `kute status --json` says not running without a runtime dir
+
 ## [0.5.0] - 2026-11-12
 
 ### Added
@@ -155,6 +166,7 @@ breaking change bumps the minor version and a fix bumps the patch version.
 
 - Install, configuration, privacy, troubleshooting and contributing guides ([#1](https://github.com/ThinkerDreamer/kute/pull/1))
 
+[0.6.0]: https://github.com/ThinkerDreamer/kute/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ThinkerDreamer/kute/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ThinkerDreamer/kute/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ThinkerDreamer/kute/compare/v0.3.0...v0.4.0

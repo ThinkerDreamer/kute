@@ -59,6 +59,8 @@ sort_commits = "oldest"
 commit_preprocessors = [
   # Link "(#12)" to its pull request.
   { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/ThinkerDreamer/kute/pull/${1}))" },
+  # Commands named in a summary read better as code than with a capital K.
+  { pattern = 'kute status --json says', replace = "`kute status --json` says" },
 ]
 # The HTML comments keep the groups in this order; striptags drops them from the output.
 commit_parsers = [
